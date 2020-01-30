@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/session/HTTPUpstreamSession.h>
 #include <folly/io/Cursor.h>
 #include <folly/io/async/EventBase.h>
@@ -33,7 +32,6 @@ using namespace testing;
 
 using std::string;
 using std::unique_ptr;
-using std::vector;
 
 class TestPriorityMapBuilder : public HTTPUpstreamSession::PriorityMapFactory {
  public:
@@ -151,11 +149,12 @@ class HTTPUpstreamTest
   }
 
   void resumeWrites() {
+    std::vector<folly::AsyncTransportWrapper::WriteCallback*> cbs;
+    std::swap(cbs, cbs_);
     pauseWrites_ = false;
-    for (auto cb : cbs_) {
+    for (auto cb : cbs) {
       handleWrite(cb);
     }
-    cbs_.clear();
   }
 
   virtual void onWriteChain(
@@ -442,7 +441,7 @@ TEST_F(SPDY3UpstreamSessionTest, ServerPush) {
         EXPECT_EQ(httpSession_->getNumIncomingStreams(), 1);
         EXPECT_TRUE(msg->getIsChunked());
         EXPECT_FALSE(msg->getIsUpgraded());
-        EXPECT_EQ(msg->getPath(), "/");
+        EXPECT_EQ(msg->getPathAsStringPiece(), "/");
         EXPECT_EQ(msg->getHeaders().getSingleOrEmpty(HTTP_HEADER_HOST),
                   "www.foo.com");
       }));
@@ -565,7 +564,6 @@ TEST_F(SPDY3UpstreamSessionTest, TestUnderLimitOnWriteError) {
 }
 
 TEST_F(SPDY3UpstreamSessionTest, TestOverlimitResume) {
-  InSequence enforceOrder;
   auto handler1 = openTransaction();
   auto handler2 = openTransaction();
 
@@ -582,17 +580,19 @@ TEST_F(SPDY3UpstreamSessionTest, TestOverlimitResume) {
   handler2->expectEgressPaused();
 
   // send body
-  handler1->txn_->sendBody(makeBuf(70000));
-  handler2->txn_->sendBody(makeBuf(70000));
+  handler1->txn_->sendBody(makeBuf(60000));
+  handler2->txn_->sendBody(makeBuf(60000));
   eventBase_.loopOnce();
 
   // when this handler is resumed, re-pause the pipe
-  handler1->expectEgressResumed(
-      [&] { handler1->txn_->sendBody(makeBuf(70000)); });
+  handler1->expectEgressResumed([&] {
+      handler1->txn_->sendBody(makeBuf(4000));
+      pauseWrites_ = true;
+    });
   // handler2 will get a shot
   handler2->expectEgressResumed();
 
-  // both handlers will be paused
+  // But the handlers pause again
   handler1->expectEgressPaused();
   handler2->expectEgressPaused();
   resumeWrites();
@@ -600,6 +600,8 @@ TEST_F(SPDY3UpstreamSessionTest, TestOverlimitResume) {
   // They both get resumed
   handler1->expectEgressResumed([&] { handler1->txn_->sendEOM(); });
   handler2->expectEgressResumed([&] { handler2->txn_->sendEOM(); });
+
+  resumeWrites();
 
   this->eventBase_.loop();
 
@@ -614,7 +616,6 @@ TEST_F(SPDY3UpstreamSessionTest, TestOverlimitResume) {
 }
 
 TEST_F(HTTP2UpstreamSessionTest, TestPriority) {
-  InSequence enforceOrder;
   // virtual priority node with pri=8
   auto priGroupID = httpSession_->sendPriority({0, false, 7});
   auto handler1 = openTransaction();
@@ -680,6 +681,21 @@ TEST_F(HTTP2UpstreamSessionTest, TestPriority) {
   handler1->expectDetachTransaction();
   handler2->expectError();
   handler2->expectDetachTransaction();
+  httpSession_->dropConnection();
+  eventBase_.loop();
+  EXPECT_EQ(sessionDestroyed_, true);
+}
+
+TEST_F(HTTP2UpstreamSessionTest, TestCircularPriority) {
+  InSequence enforceOrder;
+  auto handler1 = openTransaction();
+
+  auto req = getGetRequest();
+  // send request with circular dep
+  req.setHTTP2Priority(HTTPMessage::HTTPPriority(1, false, 255));
+  handler1->sendRequest(req);
+  handler1->terminate();
+  handler1->expectDetachTransaction();
   httpSession_->dropConnection();
   eventBase_.loop();
   EXPECT_EQ(sessionDestroyed_, true);
@@ -800,7 +816,7 @@ TEST_F(HTTP2UpstreamSessionTest, ExheaderFromServer) {
         pubHandler.txn_ = pubTxn;
       }));
   pubHandler.expectHeaders([&](std::shared_ptr<HTTPMessage> msg) {
-    EXPECT_EQ(msg->getPath(), "/messaging");
+    EXPECT_EQ(msg->getPathAsStringPiece(), "/messaging");
   });
   pubHandler.expectEOM([&]() { pubHandler.txn_->sendAbort(); });
   pubHandler.expectDetachTransaction();
@@ -1273,6 +1289,7 @@ TEST_F(HTTPUpstreamTimeoutTest, WriteTimeoutAfterResponse) {
     EXPECT_EQ(200, msg->getStatusCode());
   });
   handler->expectEOM();
+  handler->expectEgressPaused();
   handler->expectError([&](const HTTPException& err) {
     EXPECT_TRUE(err.hasProxygenError());
     ASSERT_EQ(err.getDirection(), HTTPException::Direction::INGRESS_AND_EGRESS);
@@ -1838,7 +1855,7 @@ TEST_F(HTTP2UpstreamSessionTest, ServerPush) {
     EXPECT_EQ(httpSession_->getNumIncomingStreams(), 1);
     EXPECT_TRUE(msg->getIsChunked());
     EXPECT_FALSE(msg->getIsUpgraded());
-    EXPECT_EQ(msg->getPath(), "/");
+    EXPECT_EQ(msg->getPathAsStringPiece(), "/");
     EXPECT_EQ(msg->getHeaders().getSingleOrEmpty(HTTP_HEADER_HOST),
               "www.foo.com");
   });
@@ -2327,7 +2344,6 @@ TEST_F(MockHTTPUpstreamTest, DrainBeforeSendHeaders) {
 TEST_F(MockHTTP2UpstreamTest, ReceiveDoubleGoaway) {
   // Test that we handle receiving two goaways correctly
 
-  InSequence enforceOrder;
   auto req = getGetRequest();
 
   // Open 2 txns but doesn't send headers yet
@@ -2755,6 +2771,82 @@ TEST_F(HTTP2UpstreamSessionTest, DetachFlowControlTimeout) {
     filterCount = 0;
     base.loopOnce();
   }
+  httpSession_->destroy();
+}
+
+
+TEST_F(HTTP2UpstreamSessionTest, TestPingPreserveData) {
+  auto serverCodec = makeServerCodec();
+  folly::IOBufQueue output(folly::IOBufQueue::cacheChainLength());
+  serverCodec->generateConnectionPreface(output);
+  serverCodec->generateSettings(output);
+
+  auto pingData = std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now().time_since_epoch()).count();
+  serverCodec->generatePingRequest(output, pingData);
+  NiceMock<MockHTTPCodecCallback> callbacks;
+  serverCodec->setCallback(&callbacks);
+  EXPECT_CALL(callbacks, onPingReply(pingData));
+  auto buf = output.move();
+  buf->coalesce();
+  readAndLoop(buf.get());
+  parseOutput(*serverCodec);
+  httpSession_->destroy();
+}
+
+class HTTP2UpstreamSessionTestMeasureRTT:
+  public HTTP2UpstreamSessionTest,
+  public testing::WithParamInterface<bool> {};
+
+INSTANTIATE_TEST_CASE_P(
+  HTTP2UpstreamSessionTestMeasureRTT,
+  HTTP2UpstreamSessionTestMeasureRTT,
+  Values(true, false));
+
+TEST_P(HTTP2UpstreamSessionTestMeasureRTT, TestPingMeasureRtt) {
+  std::chrono::milliseconds fakeRttMs(100);
+
+  EXPECT_FALSE(httpSession_->getMeasureRttEnabled());
+  auto measuredRtt = httpSession_->getMeasuredRtt();
+  EXPECT_FALSE(measuredRtt.hasValue());
+  httpSession_->setMeasureRttEnabled(GetParam());
+
+  auto serverCodec = makeServerCodec();
+  folly::IOBufQueue output(folly::IOBufQueue::cacheChainLength());
+  serverCodec->generateConnectionPreface(output);
+  serverCodec->generateSettings(output);
+
+  NiceMock<MockHTTPCodecCallback> callbacks;
+  serverCodec->setCallback(&callbacks);
+  EXPECT_CALL(callbacks, onPingRequest(_))
+        .WillRepeatedly(Invoke([&](uint64_t recvPingData) {
+           // faking it without the need to sleep
+           serverCodec->generatePingReply(
+             output, recvPingData - fakeRttMs.count());
+           auto buf = output.move();
+           buf->coalesce();
+           readAndLoop(buf.get());
+        }));
+
+  httpSession_->sendPing();
+  eventBase_.loop();
+  parseOutput(*serverCodec);
+
+  measuredRtt = httpSession_->getMeasuredRtt();
+  if (GetParam()) {
+    EXPECT_TRUE(measuredRtt.hasValue());
+    EXPECT_GE(measuredRtt->srtt, fakeRttMs);
+    EXPECT_GE(measuredRtt->minrtt, fakeRttMs);
+    EXPECT_GE(measuredRtt->last, fakeRttMs);
+  } else {
+    EXPECT_FALSE(measuredRtt.hasValue());
+  }
+
+  // re-setting to false also clears the measured RTT
+  httpSession_->setMeasureRttEnabled(false);
+  measuredRtt = httpSession_->getMeasuredRtt();
+  EXPECT_FALSE(measuredRtt.hasValue());
+
   httpSession_->destroy();
 }
 

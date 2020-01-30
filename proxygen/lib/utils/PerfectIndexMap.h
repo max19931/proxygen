@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2004-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <glog/logging.h>
@@ -67,6 +66,27 @@ class PerfectIndexMap {
       return getSingleOrNone(key);
     }
   }
+
+  folly::Optional<std::string> getSingleOtherKeyOrNone(
+      const std::string& keyStr) const {
+    CHECK(PerfectHashStrToKey(keyStr) == OtherKey);
+    const std::string *result = getSingleOtherKey(keyStr);
+    return (
+      result == nullptr ? folly::none : folly::Optional<std::string>(*result)
+    );
+  }
+
+  bool update(
+      Key key, const std::string &checkValue, const std::string &newValue) {
+    CHECK(key != OtherKey && key != NoneKey);
+    std::string* getResult = getSingleKeyForUpdate(key);
+    if (getResult != nullptr && stringsEqual(*getResult, checkValue)) {
+      *getResult = newValue;
+      return true;
+    }
+    return false;
+  }
+
   folly::Optional<std::string> getSingleOrNone(Key key) const {
     CHECK(key != OtherKey && key != NoneKey);
     const std::string *result = getSingleKey(key);
@@ -131,8 +151,41 @@ class PerfectIndexMap {
     return keys_.size() - noneKeyCount_;
   }
 
+  void setOtherKey(const std::string &keyStr, const std::string &value) {
+    bool set = false;
+    size_t searchIndex = 0;
+    while (searchForOtherKey(keyStr, searchIndex) != -1) {
+      if (!set) {
+        replaceOtherKeyAtIndex(searchIndex, keyStr, value);
+        if (AllowDuplicates) {
+          set = true;
+        } else {
+          return;
+        }
+      } else {
+        removeAtIndex(otherKeyNamesKeysIndex_[searchIndex]);
+      }
+      ++searchIndex;
+    }
+    if (!set) {
+      addOtherKeyToIndex(keyStr, value);
+    }
+  }
  private:
 
+
+  // Utility method for comparing strings private to this class as specified
+  // by template parameters.
+  bool stringsEqual(const std::string& strA, const std::string& strB) const {
+    if (CaseInsensitive) {
+      // One might be tempted to merge this statement with that above
+      // but that would be wrong.  If CaseInsensitive is true, we do not
+      // want any other check evaluating.
+      return caseInsensitiveEqual(strA, strB);
+    } else {
+      return strA == strB;
+    }
+  }
   // Private implementations of public methods for code reuse.
   // Technically this flow adds more copies (for ex in the case of passing
   // nullptr around as keyStr when not needed) and so slows things down a bit
@@ -186,26 +239,6 @@ class PerfectIndexMap {
     }
     if (!set) {
       addKeyToIndex(key, value);
-    }
-  }
-  void setOtherKey(const std::string &keyStr, const std::string &value) {
-    bool set = false;
-    size_t searchIndex = 0;
-    while (searchForOtherKey(keyStr, searchIndex) != -1) {
-      if (!set) {
-        replaceOtherKeyAtIndex(searchIndex, keyStr, value);
-        if (AllowDuplicates) {
-          set = true;
-        } else {
-          return;
-        }
-      } else {
-        removeAtIndex(otherKeyNamesKeysIndex_[searchIndex]);
-      }
-      ++searchIndex;
-    }
-    if (!set) {
-      addOtherKeyToIndex(keyStr, value);
     }
   }
 
@@ -310,6 +343,19 @@ class PerfectIndexMap {
     ++noneKeyCount_;
     // We purposefully omit actually clearing some other data structures
     // as it is often useful for debugging purposes to leave this data around.
+  }
+  std::string * getSingleKeyForUpdate(Key key) {
+    const Key* data = keys_.data();
+    if (data) {
+      auto offset = searchForKey(key, data);
+      if (data) {
+        if (AllowDuplicates && searchForKey(key, ++data) != -1) {
+            return nullptr;
+        }
+        return &values_[offset];
+      }
+    }
+    return nullptr;
   }
 
   /*

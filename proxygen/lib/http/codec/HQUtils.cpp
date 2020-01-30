@@ -1,13 +1,13 @@
 /*
- *  Copyright (c) 2019-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/HQUtils.h>
+#include <folly/Overload.h>
 
 namespace proxygen { namespace hq {
 
@@ -119,18 +119,17 @@ HTTP3::ErrorCode toHTTP3ErrorCode(const HTTPException& ex) {
   return HTTP3::ErrorCode::HTTP_GENERAL_PROTOCOL_ERROR;
 }
 
-ProxygenError
-toProxygenError(quic::QuicErrorCode error, bool fromPeer) {
-  return folly::variant_match(
-      error,
-      [&](quic::ApplicationErrorCode) {
-        return fromPeer ? kErrorConnectionReset : kErrorConnection;
-      },
-      [&](quic::LocalErrorCode) { return kErrorShutdown; },
-      [&](quic::TransportErrorCode) { return kErrorConnectionReset; }
-  );
+ProxygenError toProxygenError(quic::QuicErrorCode error, bool fromPeer) {
+  switch (error.type()) {
+    case quic::QuicErrorCode::Type::ApplicationErrorCode_E:
+      return fromPeer ? kErrorConnectionReset : kErrorConnection;
+    case quic::QuicErrorCode::Type::LocalErrorCode_E:
+      return kErrorShutdown;
+    case quic::QuicErrorCode::Type::TransportErrorCode_E:
+      return kErrorConnectionReset;
+  }
+  folly::assume_unreachable();
 }
-
 
 folly::Optional<hq::SettingId> httpToHqSettingsId(proxygen::SettingsId id) {
   switch (id) {
@@ -138,8 +137,6 @@ folly::Optional<hq::SettingId> httpToHqSettingsId(proxygen::SettingsId id) {
       return hq::SettingId::HEADER_TABLE_SIZE;
     case proxygen::SettingsId::MAX_HEADER_LIST_SIZE:
       return hq::SettingId::MAX_HEADER_LIST_SIZE;
-    case proxygen::SettingsId::_HQ_NUM_PLACEHOLDERS:
-      return hq::SettingId::NUM_PLACEHOLDERS;
     case proxygen::SettingsId::_HQ_QPACK_BLOCKED_STREAMS:
       return hq::SettingId::QPACK_BLOCKED_STREAMS;
     default:
@@ -152,8 +149,6 @@ folly::Optional<proxygen::SettingsId> hqToHttpSettingsId(hq::SettingId id) {
   switch (id) {
     case hq::SettingId::HEADER_TABLE_SIZE:
       return proxygen::SettingsId::HEADER_TABLE_SIZE;
-    case hq::SettingId::NUM_PLACEHOLDERS:
-      return proxygen::SettingsId::_HQ_NUM_PLACEHOLDERS;
     case hq::SettingId::MAX_HEADER_LIST_SIZE:
       return proxygen::SettingsId::MAX_HEADER_LIST_SIZE;
     case hq::SettingId::QPACK_BLOCKED_STREAMS:

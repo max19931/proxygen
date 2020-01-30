@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <folly/Memory.h>
@@ -39,23 +38,11 @@ class HTTPException : public proxygen::Exception {
     INGRESS_AND_EGRESS,
   };
 
-  explicit HTTPException(Direction dir, const std::string& msg)
-      : Exception(msg),
-        dir_(dir) {}
+  HTTPException(Direction dir, const std::string& msg);
 
-  HTTPException(const HTTPException& ex) :
-      Exception(static_cast<const Exception&>(ex)),
-      dir_(ex.dir_),
-      httpStatusCode_(ex.httpStatusCode_),
-      codecStatusCode_(ex.codecStatusCode_),
-      errno_(ex.errno_) {
-    if (ex.currentIngressBuf_) {
-      currentIngressBuf_ = ex.currentIngressBuf_->clone();
-    }
-    if (ex.partialMsg_) {
-      partialMsg_ = std::make_unique<HTTPMessage>(*ex.partialMsg_.get());
-    }
-  }
+  HTTPException(Direction dir, const char* msg);
+
+  HTTPException(const HTTPException& ex);
 
   /**
    * Returns a string representation of this exception. This function is

@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <folly/io/async/EventBase.h>
@@ -93,6 +92,11 @@ class Service {
    * It may or may not be followed by stopAccepting or resume listening.
    */
   virtual void pauseListening() {}
+
+  /**
+   * Drain remaining client connections; invoked from proxygen's main thread.
+   */
+  virtual void drainConnections() {}
 
   /**
    * Forcibly stop "pct" (0.0 to 1.0) of the remaining client connections.

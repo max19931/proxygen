@@ -1,17 +1,16 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <algorithm>
 #include <folly/Benchmark.h>
 #include <proxygen/lib/http/HTTPCommonHeaders.h>
+#include <proxygen/lib/http/HTTPHeaders.h>
 
-using namespace folly;
 using namespace proxygen;
 
 // buck build @mode/opt proxygen/lib/http/test:http_headers_benchmark
@@ -30,7 +29,7 @@ namespace {
 std::vector<HTTPHeaderCode> getTestHeaderCodes() {
   std::vector<HTTPHeaderCode> testHeaderCodes;
   for (uint64_t j = HTTPHeaderCodeCommonOffset;
-       j < HTTPCommonHeaders::num_header_codes; ++j) {
+       j < HTTPCommonHeaders::num_codes; ++j) {
     testHeaderCodes.push_back(static_cast<HTTPHeaderCode>(j));
   }
   return testHeaderCodes;
@@ -39,16 +38,16 @@ std::vector<HTTPHeaderCode> getTestHeaderCodes() {
 std::vector<const std::string *> getTestHeaderStrings() {
   std::vector<const std::string *> testHeaderStrings;
   for (uint64_t j = HTTPHeaderCodeCommonOffset;
-       j < HTTPCommonHeaders::num_header_codes; ++j) {
+       j < HTTPCommonHeaders::num_codes; ++j) {
     testHeaderStrings.push_back(
-      HTTPCommonHeaders::getPointerToHeaderName(
+      HTTPCommonHeaders::getPointerToName(
         static_cast<HTTPHeaderCode>(j)));
   }
   return testHeaderStrings;
 }
 
 static const std::string* testHeaderNames =
-  HTTPCommonHeaders::getPointerToHeaderName(HTTP_HEADER_NONE);
+  HTTPCommonHeaders::getPointerToName(HTTP_HEADER_NONE);
 
 static const std::vector<HTTPHeaderCode> testHeaderCodes = getTestHeaderCodes();
 
@@ -68,9 +67,9 @@ void HTTPCommonHeadersHashBench(int iters) {
 void HTTPCommonHeadersGetHeaderCodeFromTableCommonHeaderNameBench(int iters) {
   for (int i = 0; i < iters; ++i) {
     for (uint64_t j = HTTPHeaderCodeCommonOffset;
-         j < HTTPCommonHeaders::num_header_codes; ++j) {
-      HTTPCommonHeaders::getHeaderCodeFromTableCommonHeaderName(
-        &testHeaderNames[j], TABLE_CAMELCASE);
+         j < HTTPCommonHeaders::num_codes; ++j) {
+      HTTPCommonHeaders::getCodeFromTableName(
+        &testHeaderNames[j], HTTPCommonHeaderTableType::TABLE_CAMELCASE);
     }
   }
 }
@@ -86,7 +85,7 @@ BENCHMARK(HTTPCommonHeadersGetHeaderCodeFromTableCommonHeaderName, iters) {
 void memchrBench(int iters) {
   for (int i = 0; i < iters; ++i) {
     for (uint64_t j = HTTPHeaderCodeCommonOffset;
-         j < HTTPCommonHeaders::num_header_codes; ++j) {
+         j < HTTPCommonHeaders::num_codes; ++j) {
       CHECK(
         memchr(
           (void*)testHeaderCodes.data(), static_cast<HTTPHeaderCode>(j),
@@ -98,8 +97,8 @@ void memchrBench(int iters) {
 void stdFindBench(int iters) {
   for (int i = 0; i < iters; ++i) {
     for (uint64_t j = HTTPHeaderCodeCommonOffset;
-         j < HTTPCommonHeaders::num_header_codes; ++j) {
-      auto address = HTTPCommonHeaders::getPointerToHeaderName(
+         j < HTTPCommonHeaders::num_codes; ++j) {
+      auto address = HTTPCommonHeaders::getPointerToName(
         static_cast<HTTPHeaderCode>(j));
       CHECK(
         std::find(
@@ -115,6 +114,40 @@ BENCHMARK(memchr, iters) {
 
 BENCHMARK(stdFind, iters) {
   stdFindBench(iters);
+}
+
+void addCodeBench(int nHeaders, int hdrSize, int iters) {
+  std::string value(hdrSize, 'a');
+  for (int i = 0; i < iters; ++i) {
+    HTTPHeaders headers;
+    for (int j = 0; j < nHeaders; ++j) {
+      headers.add(HTTP_HEADER_HOST, value);
+    }
+  }
+}
+
+BENCHMARK(addCode4_headers_8_length, iters) {
+  addCodeBench(4, 8, iters);
+}
+
+BENCHMARK(addCode4_headers_32_length, iters) {
+  addCodeBench(4, 32, iters);
+}
+
+BENCHMARK(addCode16_headers_8_length, iters) {
+  addCodeBench(16, 8, iters);
+}
+
+BENCHMARK(addCode16_headers_32_length, iters) {
+  addCodeBench(16, 32, iters);
+}
+
+BENCHMARK(addCode24_headers_8_length, iters) {
+  addCodeBench(24, 8, iters);
+}
+
+BENCHMARK(addCode24_headers_32_length, iters) {
+  addCodeBench(24, 32, iters);
 }
 
 int main(int argc, char** argv) {

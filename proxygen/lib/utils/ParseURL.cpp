@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/utils/ParseURL.h>
 
 #include <algorithm>
@@ -15,8 +14,6 @@
 
 #include <proxygen/external/http_parser/http_parser.h>
 
-using folly::fbstring;
-using std::string;
 
 namespace proxygen {
 
@@ -58,6 +55,11 @@ static bool validateScheme(folly::StringPiece url) {
 }
 
 void ParseURL::parse() noexcept {
+  if (url_.size() == 1 && url_[0] == '/') {
+    path_ = url_;
+    valid_ = true;
+    return;
+  }
   if (validateScheme(url_)) {
     struct http_parser_url u;
     memset(&u, 0, sizeof(struct http_parser_url)); // init before used

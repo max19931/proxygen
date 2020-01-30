@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2019-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <folly/io/Cursor.h>
@@ -66,7 +65,7 @@ size_t generateStreamPreface(folly::IOBufQueue& writeBuf,
                              proxygen::hq::UnidirectionalStreamType type);
 
 folly::Optional<std::pair<proxygen::hq::UnidirectionalStreamType, size_t>>
-parseStreamPreface(folly::io::Cursor cursor, std::string alpn);
+parseStreamPreface(folly::io::Cursor& cursor, std::string alpn);
 
 void parseReadData(proxygen::hq::HQUnidirectionalCodec* codec,
                    folly::IOBufQueue& readBuf,
@@ -82,13 +81,15 @@ class HQSessionTest
     , public proxygen::hq::HQUnidirectionalCodec::Callback {
 
  protected:
-  explicit HQSessionTest(proxygen::TransportDirection direction)
+  explicit HQSessionTest(
+      proxygen::TransportDirection direction,
+      folly::Optional<TestParams> overrideParams = folly::none)
       : direction_(direction),
+        overrideParams_(overrideParams),
         qpackEncoderCodec_(qpackCodec_, *this),
         qpackDecoderCodec_(qpackCodec_, *this)
 
   {
-
     if (direction_ == proxygen::TransportDirection::DOWNSTREAM) {
       hqSession_ = new proxygen::HQDownstreamSession(
           std::chrono::milliseconds(kTransactionTimeout),
@@ -110,11 +111,13 @@ class HQSessionTest
       LOG(FATAL) << "wrong TransportEnum";
     }
 
-    egressControlCodec_ = std::make_unique<proxygen::hq::HQControlCodec>(
-        nextUnidirectionalStreamId_,
-        direction_,
-        proxygen::hq::StreamDirection::EGRESS,
-        egressSettings_);
+    if (!IS_H1Q_FB_V1) {
+      egressControlCodec_ = std::make_unique<proxygen::hq::HQControlCodec>(
+          nextUnidirectionalStreamId_,
+          direction_,
+          proxygen::hq::StreamDirection::EGRESS,
+          egressSettings_);
+    }
     socketDriver_ = std::make_unique<quic::MockQuicSocketDriver>(
         &eventBase_,
         *hqSession_,
@@ -152,6 +155,8 @@ class HQSessionTest
         .rttvar = std::chrono::microseconds(0),
         .lrtt = std::chrono::microseconds(0),
         .mrtt = std::chrono::microseconds(0),
+        .mss = quic::kDefaultUDPSendPacketLen,
+        .congestionControlType = quic::CongestionControlType::None,
         .writableBytes = 0,
         .congestionWindow = 1500,
         .pacingBurstSize = 0,
@@ -239,8 +244,6 @@ class HQSessionTest
       auto preface = parseStreamPreface(cursor, getProtocolString());
       CHECK(preface) << "Preface can not be parsed protocolString="
                      << getProtocolString();
-
-      buf->trimStart(preface->second);
       switch (preface->first) {
         case proxygen::hq::UnidirectionalStreamType::H1Q_CONTROL:
         case proxygen::hq::UnidirectionalStreamType::CONTROL:
@@ -255,12 +258,27 @@ class HQSessionTest
         case proxygen::hq::UnidirectionalStreamType::QPACK_ENCODER:
         case proxygen::hq::UnidirectionalStreamType::QPACK_DECODER:
           break;
+        case proxygen::hq::UnidirectionalStreamType::PUSH:
+          {
+            auto pushIt = std::find_if(
+              pushes_.begin(), pushes_.end(),
+              [id] (std::pair<quic::StreamId, proxygen::hq::PushId> entry) {
+                return id == entry.first; });
+            if (pushIt == pushes_.end()) {
+              auto pushId = quic::decodeQuicInteger(cursor);
+              if (pushId) {
+                pushes_.emplace(pushId->first, id);
+              }
+            }
+          }
+          return;
         default:
-          CHECK(false) << "Unknown stream preface";
+          CHECK(false) << "Unknown stream preface=" << preface->first;
       }
       socketDriver_->sock_->setControlStream(id);
       auto res = controlStreams_.emplace(id, preface->first);
       it = res.first;
+      buf->trimStart(preface->second);
       if (buf->empty()) {
         return;
       }
@@ -279,8 +297,8 @@ class HQSessionTest
         parseReadData(&qpackDecoderCodec_, decoderReadBuf_, std::move(buf));
         break;
       case proxygen::hq::UnidirectionalStreamType::PUSH:
-        CHECK(false) << "Ingress push streams should not go through "
-                     << "the unidirectional read path";
+        VLOG(4) << "Ingress push streams should not go through "
+                << "the unidirectional read path";
         break;
       default:
         CHECK(false) << "Unknown stream type=" << it->second;
@@ -312,7 +330,34 @@ class HQSessionTest
     return controllerContainer_.mockController;
   }
 
+ public:
+  quic::MockQuicSocketDriver* getSocketDriver() {
+    return socketDriver_.get();
+  }
+
+  proxygen::HQSession* getSession() {
+    return hqSession_;
+  }
+
+  void setSessionDestroyCallback(
+      folly::Function<void(const proxygen::HTTPSessionBase&)> cb) {
+    EXPECT_CALL(infoCb_, onDestroy(testing::_))
+        .WillOnce(testing::Invoke(
+            [&](const proxygen::HTTPSessionBase&) { cb(*hqSession_); }));
+  }
+
+  const TestParams& GetParam() const {
+    if (overrideParams_) {
+      return *overrideParams_;
+    } else {
+      const testing::TestWithParam<TestParams>* base = this;
+      return base->GetParam();
+    }
+  }
+
+ protected:
   proxygen::TransportDirection direction_;
+  folly::Optional<TestParams> overrideParams_;
   // Unidirectional Stream Codecs used for Ingress Only
   proxygen::hq::QPACKEncoderCodec qpackEncoderCodec_;
   proxygen::hq::QPACKDecoderCodec qpackDecoderCodec_;
@@ -347,4 +392,5 @@ class HQSessionTest
   quic::StreamId nextUnidirectionalStreamId_;
   // Egress Control Stream
   std::unique_ptr<proxygen::hq::HQControlCodec> egressControlCodec_;
+  folly::F14FastMap<proxygen::hq::PushId, quic::StreamId> pushes_;
 };

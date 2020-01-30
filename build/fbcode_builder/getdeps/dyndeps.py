@@ -1,10 +1,8 @@
 #!/usr/bin/env python
-# Copyright (c) 2019-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
@@ -37,14 +35,19 @@ class DepBase(object):
     def interesting_dep(self, d):
         return True
 
+    # final_install_prefix must be the equivalent path to `destdir` on the
+    # installed system.  For example, if destdir is `/tmp/RANDOM/usr/local' which
+    # is intended to map to `/usr/local` in the install image, then
+    # final_install_prefix='/usr/local'.
+    # If left unspecified, destdir will be used.
     def process_deps(self, destdir, final_install_prefix=None):
-        if final_install_prefix is None:
-            final_install_prefix = destdir
-
         if self.buildopts.is_windows():
-            self.munged_lib_dir = os.path.join(final_install_prefix, "bin")
+            lib_dir = "bin"
         else:
-            self.munged_lib_dir = os.path.join(final_install_prefix, "lib")
+            lib_dir = "lib"
+        self.munged_lib_dir = os.path.join(destdir, lib_dir)
+
+        final_lib_dir = os.path.join(final_install_prefix or destdir, lib_dir)
 
         if not os.path.isdir(self.munged_lib_dir):
             os.makedirs(self.munged_lib_dir)
@@ -58,7 +61,7 @@ class DepBase(object):
             src_dir = os.path.join(inst_dir, dir)
             if not os.path.isdir(src_dir):
                 continue
-            dest_dir = os.path.join(final_install_prefix, dir)
+            dest_dir = os.path.join(destdir, dir)
             if not os.path.exists(dest_dir):
                 os.makedirs(dest_dir)
 
@@ -66,9 +69,9 @@ class DepBase(object):
                 print("Consider %s/%s" % (dir, objfile))
                 dest_obj = os.path.join(dest_dir, objfile)
                 copyfile(os.path.join(src_dir, objfile), dest_obj)
-                self.munge_in_place(dest_obj)
+                self.munge_in_place(dest_obj, final_lib_dir)
 
-    def munge_in_place(self, objfile):
+    def munge_in_place(self, objfile, final_lib_dir):
         print("Munging %s" % objfile)
         for d in self.list_dynamic_deps(objfile):
             if not self.interesting_dep(d):
@@ -83,11 +86,11 @@ class DepBase(object):
                 if dep not in self.processed_deps:
                     self.processed_deps.add(dep)
                     copyfile(dep, dest_dep)
-                    self.munge_in_place(dest_dep)
+                    self.munge_in_place(dest_dep, final_lib_dir)
 
-                self.rewrite_dep(objfile, d, dep, dest_dep)
+                self.rewrite_dep(objfile, d, dep, dest_dep, final_lib_dir)
 
-    def rewrite_dep(self, objfile, depname, old_dep, new_dep):
+    def rewrite_dep(self, objfile, depname, old_dep, new_dep, final_lib_dir):
         raise RuntimeError("rewrite_dep not implemented")
 
     def resolve_loader_path(self, dep):
@@ -157,7 +160,7 @@ class WinDeps(DepBase):
 
         return deps
 
-    def rewrite_dep(self, objfile, depname, old_dep, new_dep):
+    def rewrite_dep(self, objfile, depname, old_dep, new_dep, final_lib_dir):
         # We can't rewrite on windows, but we will
         # place the deps alongside the exe so that
         # they end up in the search path
@@ -196,7 +199,16 @@ class WinDeps(DepBase):
 class ElfDeps(DepBase):
     def __init__(self, buildopts, install_dirs):
         super(ElfDeps, self).__init__(buildopts, install_dirs)
-        self.patchelf = path_search(self.env, "patchelf")
+
+        # We need patchelf to rewrite deps, so ensure that it is built...
+        subprocess.check_call([sys.executable, sys.argv[0], "build", "patchelf"])
+        # ... and that we know where it lives
+        self.patchelf = os.path.join(
+            subprocess.check_output(
+                [sys.executable, sys.argv[0], "show-inst-dir", "patchelf"]
+            ).strip(),
+            "bin/patchelf",
+        )
 
     def list_dynamic_deps(self, objfile):
         out = (
@@ -209,7 +221,7 @@ class ElfDeps(DepBase):
         lines = out.split("\n")
         return lines
 
-    def rewrite_dep(self, objfile, depname, old_dep, new_dep):
+    def rewrite_dep(self, objfile, depname, old_dep, new_dep, final_lib_dir):
         subprocess.check_call(
             [self.patchelf, "--replace-needed", depname, new_dep, objfile]
         )
@@ -239,7 +251,10 @@ class MachDeps(DepBase):
         with open(objfile, "rb") as f:
             # mach stores the magic number in native endianness,
             # so unpack as native here and compare
-            magic = unpack("I", f.read(4))[0]
+            header = f.read(4)
+            if len(header) != 4:
+                return False
+            magic = unpack("I", header)[0]
             return magic == MACH_MAGIC
 
     def list_dynamic_deps(self, objfile):
@@ -261,7 +276,7 @@ class MachDeps(DepBase):
                     deps.append(os.path.normcase(m.group(1)))
         return deps
 
-    def rewrite_dep(self, objfile, depname, old_dep, new_dep):
+    def rewrite_dep(self, objfile, depname, old_dep, new_dep, final_lib_dir):
         if objfile.endswith(".dylib"):
             # Erase the original location from the id of the shared
             # object.  It doesn't appear to hurt to retain it, but
@@ -269,8 +284,12 @@ class MachDeps(DepBase):
             subprocess.check_call(
                 ["install_name_tool", "-id", os.path.basename(objfile), objfile]
             )
+        final_dep = os.path.join(
+            final_lib_dir, os.path.relpath(new_dep, self.munged_lib_dir)
+        )
+
         subprocess.check_call(
-            ["install_name_tool", "-change", depname, new_dep, objfile]
+            ["install_name_tool", "-change", depname, final_dep, objfile]
         )
 
 

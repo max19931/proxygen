@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <assert.h>
@@ -30,9 +29,13 @@ class CodecUtil {
     return proxygen::validateURL(url);
   }
 
+  static bool isalpha(uint8_t c) {
+    return ((unsigned int)(c | 32) - 97) < 26U;
+  }
+
   static bool validateMethod(folly::ByteRange method) {
     for (auto p: method) {
-      if (!isalpha(p)) {
+      if (!CodecUtil::isalpha(p)) {
         // methods are all characters
         return false;
       }
@@ -140,9 +143,11 @@ class CodecUtil {
   static bool hasGzipAndDeflate(const std::string& value, bool& hasGzip,
                                 bool& hasDeflate);
 
-  static std::vector<compress::Header> prepareMessageForCompression(
+  static void prepareMessageForCompression(
       const HTTPMessage& msg,
-      std::vector<std::string>& temps);
+      std::vector<compress::Header>& allHeaders,
+      std::vector<std::string>& temps,
+      bool addDateToResponse=true);
 
   static bool appendHeaders(const HTTPHeaders& inputHeaders,
                             std::vector<compress::Header>& headers,

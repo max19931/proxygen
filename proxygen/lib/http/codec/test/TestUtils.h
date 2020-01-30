@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <folly/portability/GTest.h>
@@ -138,7 +137,7 @@ class FakeHTTPCodecCallback : public HTTPCodec::Callback {
     bodyCalls++;
     paddingBytes += padding;
     bodyLength += chain->computeChainDataLength();
-    data.append(std::move(chain));
+    data_.append(std::move(chain));
   }
   void onChunkHeader(HTTPCodec::StreamID /*stream*/,
                      size_t /*length*/) override {
@@ -188,15 +187,15 @@ class FakeHTTPCodecCallback : public HTTPCodec::Callback {
                 std::unique_ptr<folly::IOBuf> debugData) override {
     ++goaways;
     goawayStreamIds.emplace_back(lastStreamId);
-    data.append(std::move(debugData));
+    data_.append(std::move(debugData));
   }
 
-  void onPingRequest(uint64_t uniqueID) override {
-    recvPingRequest = uniqueID;
+  void onPingRequest(uint64_t data) override {
+    recvPingRequest = data;
   }
 
-  void onPingReply(uint64_t uniqueID) override {
-    recvPingReply = uniqueID;
+  void onPingReply(uint64_t data) override {
+    recvPingReply = data;
   }
 
   void onPriority(HTTPCodec::StreamID /*streamID*/,
@@ -229,14 +228,14 @@ class FakeHTTPCodecCallback : public HTTPCodec::Callback {
       uint16_t requestId, std::unique_ptr<folly::IOBuf> authRequest) override {
     certificateRequests++;
     lastCertRequestId = requestId;
-    data.append(std::move(authRequest));
+    data_.append(std::move(authRequest));
   }
 
   void onCertificate(uint16_t certId,
                      std::unique_ptr<folly::IOBuf> authenticator) override {
     certificates++;
     lastCertId = certId;
-    data.append(std::move(authenticator));
+    data_.append(std::move(authenticator));
   }
 
   bool onNativeProtocolUpgrade(HTTPCodec::StreamID,
@@ -333,7 +332,7 @@ class FakeHTTPCodecCallback : public HTTPCodec::Callback {
     headerFrames = 0;
     priority = HTTPMessage::HTTPPriority(0, false, 0);
     windowUpdates.clear();
-    data.move();
+    data_.move();
     msg.reset();
     lastParseError.reset();
     lastErrorCode = ErrorCode::NO_ERROR;
@@ -406,7 +405,7 @@ class FakeHTTPCodecCallback : public HTTPCodec::Callback {
   uint32_t headerFrames{0};
   HTTPMessage::HTTPPriority priority{0, false, 0};
   std::map<proxygen::HTTPCodec::StreamID, std::vector<uint32_t> > windowUpdates;
-  folly::IOBufQueue data;
+  folly::IOBufQueue data_;
 
   std::unique_ptr<HTTPMessage> msg;
   std::unique_ptr<HTTPException> lastParseError;

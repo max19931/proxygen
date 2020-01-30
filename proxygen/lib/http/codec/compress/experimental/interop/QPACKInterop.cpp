@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2018-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <folly/File.h>
 #include <folly/FileUtil.h>
 #include <folly/init/Init.h>
@@ -62,15 +61,22 @@ void encodeBlocks(QPACKCodec& decoder,
                               result.stream->computeChainDataLength(),
                               &cb);
       writeFrame(appender, streamId, std::move(result.stream));
-      if (FLAGS_ack && cb.acknowledge) {
-        encoder.decodeDecoderStream(decoder.encodeHeaderAck(streamId));
-      }
     }
     if (result.control) {
       decoder.decodeEncoderStream(result.control->clone());
       writeFrame(appender, 0, std::move(result.control));
       if (FLAGS_ack) {
         // There can be ICI when the decoder is non-blocking
+        auto res = decoder.encodeInsertCountInc();
+        if (res) {
+          encoder.decodeDecoderStream(std::move(res));
+        }
+      }
+    }
+    if (FLAGS_ack) {
+      if (cb.acknowledge) {
+        encoder.decodeDecoderStream(decoder.encodeHeaderAck(streamId));
+      } else {
         auto res = decoder.encodeInsertCountInc();
         if (res) {
           encoder.decodeDecoderStream(std::move(res));
@@ -212,13 +218,13 @@ class QIFCallback : public HPACK::StreamingCallback {
     id(id_),
     of(of_) {}
 
-  void onHeader(const folly::fbstring& name,
+  void onHeader(const HPACKHeaderName& name,
                 const folly::fbstring& value) override {
     if (first) {
       of << "# stream " << id << std::endl;
       first = false;
     }
-    of << name << "\t" << value << std::endl;
+    of << name.get() << "\t" << value << std::endl;
   }
   void onHeadersComplete(HTTPHeaderSize /*decodedSize*/,
                          bool /*acknowledge*/) override {
@@ -410,8 +416,12 @@ int interopQIF(QPACKCodec& decoder) {
 int main(int argc, char** argv) {
   folly::init(&argc, &argv, true);
   QPACKCodec decoder;
+  decoder.setEncoderHeaderTableSize(FLAGS_table_size);
+  std::vector<compress::Header> empty;
+  auto res = decoder.encode(empty, 0);
   decoder.setMaxBlocking(FLAGS_max_blocking);
   decoder.setDecoderHeaderTableMaxSize(FLAGS_table_size);
+  decoder.decodeEncoderStream(std::move(res.control));
   if (!FLAGS_har.empty()) {
     return interopHAR(decoder);
   } else {

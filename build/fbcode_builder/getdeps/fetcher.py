@@ -1,9 +1,7 @@
-# Copyright (c) 2019-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
@@ -130,6 +128,26 @@ class Fetcher(object):
         pass
 
 
+class LocalDirFetcher(object):
+    """ This class exists to override the normal fetching behavior, and
+    use an explicit user-specified directory for the project sources.
+
+    This fetcher cannot update or track changes.  It always reports that the
+    project has changed, forcing it to always be built. """
+
+    def __init__(self, path):
+        self.path = os.path.realpath(path)
+
+    def update(self):
+        return ChangeStatus(all_changed=True)
+
+    def hash(self):
+        return "0" * 40
+
+    def get_src_dir(self):
+        return self.path
+
+
 class GitFetcher(Fetcher):
     DEFAULT_DEPTH = 100
 
@@ -148,7 +166,7 @@ class GitFetcher(Fetcher):
             os.makedirs(repos_dir)
         self.repo_dir = os.path.join(repos_dir, directory)
 
-        if not rev:
+        if not rev and build_options.project_hashes:
             hash_file = os.path.join(
                 build_options.project_hashes,
                 re.sub("\\.git$", "-rev.txt", url.path[1:]),
@@ -455,7 +473,10 @@ class SimpleShipitTransformerFetcher(Fetcher):
         return mapping.mirror(self.build_options.fbsource_dir, self.repo_dir)
 
     def hash(self):
-        return get_fbsource_repo_hash(self.build_options)
+        # We return a fixed non-hash string for in-fbsource builds.
+        # We're relying on the `update` logic to correctly invalidate
+        # the build in the case that files have changed.
+        return "fbsource"
 
     def get_src_dir(self):
         return self.repo_dir
@@ -522,7 +543,8 @@ class ShipitTransformerFetcher(Fetcher):
             raise
 
     def hash(self):
-        return get_fbsource_repo_hash(self.build_options)
+        # We return a fixed non-hash string for in-fbsource builds.
+        return "fbsource"
 
     def get_src_dir(self):
         return self.repo_dir
@@ -554,7 +576,7 @@ def download_url_to_file_with_progress(url, file_name):
     start = time.time()
     try:
         (_filename, headers) = urlretrieve(url, file_name, reporthook=progress.progress)
-    except OSError as exc:
+    except (OSError, IOError) as exc:
         raise TransientFailure(
             "Failed to download %s to %s: %s" % (url, file_name, str(exc))
         )

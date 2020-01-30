@@ -1,11 +1,9 @@
 /*
- *  Copyright (c) 2019-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <proxygen/lib/http/session/HQUnidirectionalCallbacks.h>
@@ -24,7 +22,7 @@ void HQUnidirStreamDispatcher::onDataAvailable(
     return;
   }
 
-  // If this strem is operating in the partially reliable mode,
+  // If this stream is operating in partially reliable mode
   // do not attempt to parse the preface.
   // The sink is responsible for deciding when a stream can become
   // partially reliable.
@@ -33,13 +31,20 @@ void HQUnidirStreamDispatcher::onDataAvailable(
     return;
   }
 
+  auto& peekFirst = peekData.front();
   // if not at offset 0, ignore
-  if (peekData.front().offset != 0) {
+  if (peekFirst.offset != 0) {
+    return;
+  }
+
+  // empty buffer, just EOF
+  auto dataBuf = peekFirst.data.front();
+  if (!dataBuf) {
     return;
   }
 
   // Look for a stream preface in the first read buffer
-  folly::io::Cursor cursor(peekData.front().data.front());
+  folly::io::Cursor cursor(dataBuf);
   auto preface = quic::decodeQuicInteger(cursor);
   if (!preface) {
     return;

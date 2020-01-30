@@ -1,24 +1,27 @@
-# Copyright (c) 2019-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-import base64
 import errno
 import glob
-import hashlib
 import ntpath
 import os
 import subprocess
 import sys
 import tempfile
 
-from .envfuncs import Env, add_path_entry, path_search
+from .envfuncs import Env, add_path_entry
+from .manifest import ContextGenerator
 from .platform import HostType, is_windows
+
+
+try:
+    import typing  # noqa: F401
+except ImportError:
+    pass
 
 
 def containing_repo_type(path):
@@ -30,8 +33,26 @@ def containing_repo_type(path):
 
         parent = os.path.dirname(path)
         if parent == path:
-            return None
+            return None, None
         path = parent
+
+
+def detect_project(path):
+    repo_type, repo_root = containing_repo_type(path)
+    if repo_type is None:
+        return None, None
+
+    # Look for a .projectid file.  If it exists, read the project name from it.
+    project_id_path = os.path.join(repo_root, ".projectid")
+    try:
+        with open(project_id_path, "r") as f:
+            project_name = f.read().strip()
+            return repo_root, project_name
+    except EnvironmentError as ex:
+        if ex.errno != errno.ENOENT:
+            raise
+
+    return repo_root, None
 
 
 class BuildOptions(object):
@@ -73,11 +94,13 @@ class BuildOptions(object):
                 self.project_hashes = hashes
                 break
 
-        # Use a simplistic heuristic to figure out if we're in fbsource
-        # and where the root of fbsource can be found
-        repo_type, repo_root = containing_repo_type(fbcode_builder_dir)
-        if repo_type == "hg":
-            self.fbsource_dir = repo_root
+        # Detect what repository and project we are being run from.
+        self.repo_root, self.repo_project = detect_project(os.getcwd())
+
+        # If we are running from an fbsource repository, set self.fbsource_dir
+        # to allow the ShipIt-based fetchers to use it.
+        if self.repo_project == "fbsource":
+            self.fbsource_dir = self.repo_root
         else:
             self.fbsource_dir = None
 
@@ -92,23 +115,32 @@ class BuildOptions(object):
             # On Windows, the compiler is not available in the PATH by
             # default so we need to run the vcvarsall script to populate the
             # environment. We use a glob to find some version of this script
-            # as deployed with Visual Studio 2017.  This logic will need
-            # updating when we switch to a newer compiler.
-            vcvarsall = glob.glob(
-                os.path.join(
-                    os.environ["ProgramFiles(x86)"],
-                    "Microsoft Visual Studio",
-                    "2017",
-                    "*",
-                    "VC",
-                    "Auxiliary",
-                    "Build",
-                    "vcvarsall.bat",
+            # as deployed with Visual Studio 2017.  This logic can also
+            # locate Visual Studio 2019 but note that at the time of writing
+            # the version of boost in our manifest cannot be built with
+            # VS 2019, so we're effectively tied to VS 2017 until we upgrade
+            # the boost dependency.
+            vcvarsall = []
+            for year in ["2017", "2019"]:
+                vcvarsall += glob.glob(
+                    os.path.join(
+                        os.environ["ProgramFiles(x86)"],
+                        "Microsoft Visual Studio",
+                        year,
+                        "*",
+                        "VC",
+                        "Auxiliary",
+                        "Build",
+                        "vcvarsall.bat",
+                    )
                 )
-            )
             vcvars_path = vcvarsall[0]
 
         self.vcvars_path = vcvars_path
+
+    @property
+    def manifests_dir(self):
+        return os.path.join(self.fbcode_builder_dir, "manifests")
 
     def is_darwin(self):
         return self.host_type.is_darwin()
@@ -122,86 +154,57 @@ class BuildOptions(object):
     def is_linux(self):
         return self.host_type.is_linux()
 
-    def _compute_hash(self, hash_by_name, manifest, manifests_by_name, ctx):
-        """ This recursive function computes a hash for a given manifest.
-        The hash takes into account some environmental factors on the
-        host machine and includes the hashes of its dependencies.
-        No caching of the computation is performed, which is theoretically
-        wasteful but the computation is fast enough that it is not required
-        to cache across multiple invocations. """
-
-        h = hash_by_name.get(manifest.name, None)
-        if h is not None:
-            return h
-
-        hasher = hashlib.sha256()
-        # Some environmental and configuration things matter
-        env = {}
-        env["install_dir"] = self.install_dir
-        env["scratch_dir"] = self.scratch_dir
-        env["os"] = self.host_type.ostype
-        env["distro"] = self.host_type.distro
-        env["distro_vers"] = self.host_type.distrovers
-        for name in ["CXXFLAGS", "CPPFLAGS", "LDFLAGS", "CXX", "CC"]:
-            env[name] = os.environ.get(name)
-        for tool in ["cc", "c++", "gcc", "g++", "clang", "clang++"]:
-            env["tool-%s" % tool] = path_search(os.environ, tool)
-
-        fetcher = manifest.create_fetcher(self, ctx)
-        env["fetcher.hash"] = fetcher.hash()
-
-        for name in sorted(env.keys()):
-            hasher.update(name.encode("utf-8"))
-            value = env.get(name)
-            if value is not None:
-                hasher.update(value.encode("utf-8"))
-
-        manifest.update_hash(hasher, ctx)
-
-        dep_list = sorted(manifest.get_section_as_dict("dependencies", ctx).keys())
-        for dep in dep_list:
-            dep_hash = self._compute_hash(
-                hash_by_name, manifests_by_name[dep], manifests_by_name, ctx
-            )
-            hasher.update(dep_hash.encode("utf-8"))
-
-        # Use base64 to represent the hash, rather than the simple hex digest,
-        # so that the string is shorter.  Use the URL-safe encoding so that
-        # the hash can also be safely used as a filename component.
-        h = base64.urlsafe_b64encode(hasher.digest()).decode("ascii")
-        # ... and because cmd.exe is troublesome with `=` signs, nerf those.
-        # They tend to be padding characters at the end anyway, so we can
-        # safely discard them.
-        h = h.replace("=", "")
-        hash_by_name[manifest.name] = h
-
-        return h
-
-    def compute_dirs(self, manifest, fetcher, manifests_by_name, ctx):
-        hash_by_name = {}
-        hash = self._compute_hash(hash_by_name, manifest, manifests_by_name, ctx)
-
-        if manifest.is_first_party_project():
-            directory = manifest.name
+    def get_context_generator(self, host_tuple=None, facebook_internal=None):
+        """ Create a manifest ContextGenerator for the specified target platform. """
+        if host_tuple is None:
+            host_type = self.host_type
+        elif isinstance(host_tuple, HostType):
+            host_type = host_tuple
         else:
-            directory = "%s-%s" % (manifest.name, hash)
+            host_type = HostType.from_tuple_string(host_tuple)
 
-        build_dir = os.path.join(self.scratch_dir, "build", directory)
-        inst_dir = os.path.join(self.install_dir, directory)
+        # facebook_internal is an Optional[bool]
+        # If it is None, default to assuming this is a Facebook-internal build if
+        # we are running in an fbsource repository.
+        if facebook_internal is None:
+            facebook_internal = self.fbsource_dir is not None
 
-        return {"build_dir": build_dir, "inst_dir": inst_dir, "hash": hash}
+        return ContextGenerator(
+            {
+                "os": host_type.ostype,
+                "distro": host_type.distro,
+                "distro_vers": host_type.distrovers,
+                "fb": "on" if facebook_internal else "off",
+                "test": "off",
+            }
+        )
 
     def compute_env_for_install_dirs(self, install_dirs, env=None):
-        if env:
+        if env is not None:
             env = env.copy()
         else:
             env = Env()
+
+        if self.fbsource_dir:
+            env["YARN_YARN_OFFLINE_MIRROR"] = os.path.join(
+                self.fbsource_dir, "xplat/third-party/yarn/offline-mirror"
+            )
+            yarn_exe = "yarn.bat" if self.is_windows() else "yarn"
+            env["YARN_PATH"] = os.path.join(
+                self.fbsource_dir, "xplat/third-party/yarn/", yarn_exe
+            )
+            node_exe = "node-win-x64.exe" if self.is_windows() else "node"
+            env["NODE_BIN"] = os.path.join(
+                self.fbsource_dir, "xplat/third-party/node/bin/", node_exe
+            )
 
         lib_path = None
         if self.is_darwin():
             lib_path = "DYLD_LIBRARY_PATH"
         elif self.is_linux():
             lib_path = "LD_LIBRARY_PATH"
+        elif self.is_windows():
+            lib_path = "PATH"
         else:
             lib_path = None
 
@@ -209,6 +212,10 @@ class BuildOptions(object):
             add_path_entry(env, "CMAKE_PREFIX_PATH", d)
 
             pkgconfig = os.path.join(d, "lib/pkgconfig")
+            if os.path.exists(pkgconfig):
+                add_path_entry(env, "PKG_CONFIG_PATH", pkgconfig)
+
+            pkgconfig = os.path.join(d, "lib64/pkgconfig")
             if os.path.exists(pkgconfig):
                 add_path_entry(env, "PKG_CONFIG_PATH", pkgconfig)
 
@@ -226,6 +233,19 @@ class BuildOptions(object):
             bindir = os.path.join(d, "bin")
             if os.path.exists(bindir):
                 add_path_entry(env, "PATH", bindir, append=False)
+
+            # If rustc is present in the `bin` directory, set RUSTC to prevent
+            # cargo uses the rustc installed in the system.
+            if self.is_windows():
+                rustc_path = os.path.join(bindir, "rustc.bat")
+                rustdoc_path = os.path.join(bindir, "rustdoc.bat")
+            else:
+                rustc_path = os.path.join(bindir, "rustc")
+                rustdoc_path = os.path.join(bindir, "rustdoc")
+
+            if os.path.isfile(rustc_path):
+                env["RUSTC"] = rustc_path
+                env["RUSTDOC"] = rustdoc_path
 
         return env
 

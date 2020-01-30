@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <folly/portability/GFlags.h>
 #include <folly/Memory.h>
 #include <folly/io/async/EventBaseManager.h>
@@ -19,8 +18,6 @@
 using namespace ProxyService;
 using namespace proxygen;
 
-using folly::EventBase;
-using folly::EventBaseManager;
 using folly::SocketAddress;
 using folly::HHWheelTimer;
 

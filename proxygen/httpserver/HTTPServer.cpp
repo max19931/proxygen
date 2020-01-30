@@ -1,11 +1,9 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 #include <proxygen/httpserver/HTTPServer.h>
@@ -19,11 +17,8 @@
 #include <proxygen/httpserver/filters/CompressionFilter.h>
 #include <wangle/ssl/SSLContextManager.h>
 
-using folly::AsyncServerSocket;
-using folly::EventBase;
 using folly::EventBaseManager;
 using folly::IOThreadPoolExecutor;
-using folly::SocketAddress;
 using folly::ThreadPoolExecutor;
 
 namespace proxygen {
@@ -116,11 +111,7 @@ class HandlerCallbacks : public ThreadPoolExecutor::Observer {
   std::shared_ptr<HTTPServerOptions> options_;
 };
 
-
-void HTTPServer::start(std::function<void()> onSuccess,
-                       std::function<void(std::exception_ptr)> onError) {
-  mainEventBase_ = EventBaseManager::get()->getEventBase();
-
+folly::Expected<folly::Unit, std::exception_ptr> HTTPServer::startTcpServer() {
   auto accExe = std::make_shared<IOThreadPoolExecutor>(1);
   auto exe = std::make_shared<IOThreadPoolExecutor>(options_->threads,
     std::make_shared<folly::NamedThreadFactory>("HTTPSrvExec"));
@@ -156,15 +147,26 @@ void HTTPServer::start(std::function<void()> onSuccess,
         bootstrap_[i].bind(addresses_[i].address);
       }
     }
-  } catch (const std::exception& ex) {
+  } catch (const std::exception&) {
     stop();
 
+    return folly::makeUnexpected(std::current_exception());
+  }
+
+  return folly::unit;
+}
+
+
+void HTTPServer::start(std::function<void()> onSuccess,
+                       std::function<void(std::exception_ptr)> onError) {
+  mainEventBase_ = EventBaseManager::get()->getEventBase();
+
+  if (auto tcpStarted = startTcpServer(); tcpStarted.hasError()) {
     if (onError) {
-      onError(std::current_exception());
+      onError(tcpStarted.error());
       return;
     }
-
-    throw;
+    std::rethrow_exception(tcpStarted.error());
   }
 
   // Install signal handler if required

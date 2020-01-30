@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <folly/Conv.h>
 #include <glog/logging.h>
 #include <folly/portability/GTest.h>
@@ -22,7 +21,6 @@
 using namespace folly;
 using namespace proxygen;
 using namespace std;
-using namespace testing;
 
 class HPACKContextTests : public testing::TestWithParam<bool> {
 };
@@ -270,6 +268,17 @@ TEST_F(HPACKContextTests, ExcludeHeadersLargerThanTable) {
   CHECK_EQ(encoder.getIndex(headers[1]), 0);
   CHECK_EQ(encoder.getIndex(headers[0]), 62);
 }
+
+TEST_F(HPACKContextTests, EncodeToWriteBuf) {
+  HPACKEncoder encoder(true);
+  folly::IOBufQueue writeBuf{folly::IOBufQueue::cacheChainLength()};
+  vector<HPACKHeader> headers;
+  headers.push_back(HPACKHeader("x-fb-debug", "test"));
+
+  encoder.encode(headers, writeBuf);
+  EXPECT_GT(writeBuf.chainLength(), 0);
+}
+
 
 TEST_P(HPACKContextTests, ContextUpdate) {
   HPACKEncoder encoder(true);

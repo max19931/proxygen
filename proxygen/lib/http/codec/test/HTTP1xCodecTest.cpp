@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <folly/portability/GTest.h>
 #include <proxygen/lib/http/HTTPHeaderSize.h>
 #include <proxygen/lib/http/HTTPMessage.h>
@@ -81,7 +80,7 @@ TEST(HTTP1xCodecTest, TestSimpleHeaders) {
   codec.onIngress(*buffer);
   EXPECT_EQ(callbacks.headersComplete, 1);
   EXPECT_EQ(buffer->length(), callbacks.headerSize.uncompressed);
-  EXPECT_EQ(callbacks.headerSize.compressed, 0);
+  EXPECT_EQ(callbacks.headerSize.compressed, callbacks.headerSize.uncompressed);
 }
 
 TEST(HTTP1xCodecTest, Test09Req) {
@@ -93,7 +92,7 @@ TEST(HTTP1xCodecTest, Test09Req) {
   EXPECT_EQ(callbacks.headersComplete, 1);
   EXPECT_EQ(callbacks.messageComplete, 1);
   EXPECT_EQ(buffer->length(), callbacks.headerSize.uncompressed);
-  EXPECT_EQ(callbacks.headerSize.compressed, 0);
+  EXPECT_EQ(callbacks.headerSize.compressed, callbacks.headerSize.uncompressed);
   buffer = folly::IOBuf::copyBuffer(string("\r\n"));
   codec.onIngress(*buffer);
   EXPECT_EQ(callbacks.headersComplete, 1);
@@ -110,7 +109,7 @@ TEST(HTTP1xCodecTest, Test09ReqVers) {
   EXPECT_EQ(callbacks.headersComplete, 1);
   EXPECT_EQ(callbacks.messageComplete, 1);
   EXPECT_EQ(buffer->length(), callbacks.headerSize.uncompressed);
-  EXPECT_EQ(callbacks.headerSize.compressed, 0);
+  EXPECT_EQ(callbacks.headerSize.compressed, callbacks.headerSize.uncompressed);
 }
 
 TEST(HTTP1xCodecTest, Test09Resp) {
@@ -132,6 +131,20 @@ TEST(HTTP1xCodecTest, Test09Resp) {
   EXPECT_EQ(callbacks.messageComplete, 0);
   codec.onIngressEOF();
   EXPECT_EQ(callbacks.messageComplete, 1);
+}
+
+TEST(HTTP1xCodecTest, TestO9NoVersion) {
+  HTTP1xCodec codec(TransportDirection::UPSTREAM);
+  HTTP1xCodecCallback callbacks;
+  HTTPMessage req;
+  auto id = codec.createStream();
+  req.setHTTPVersion(0, 9);
+  req.setMethod(HTTPMethod::GET);
+  req.setURL("/yeah");
+  folly::IOBufQueue buf;
+  codec.generateHeader(buf, id, req, true);
+  EXPECT_TRUE(folly::IOBufEqualTo()(
+      *buf.front(), *folly::IOBuf::copyBuffer("GET /yeah\r\n")));
 }
 
 TEST(HTTP1xCodecTest, TestBadHeaders) {

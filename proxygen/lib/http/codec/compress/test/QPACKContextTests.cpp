@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2018-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <folly/Conv.h>
 #include <glog/logging.h>
 #include <folly/portability/GTest.h>
@@ -20,7 +19,6 @@
 using namespace folly;
 using namespace proxygen;
 using namespace std;
-using namespace testing;
 
 namespace {
 std::shared_ptr<bool>

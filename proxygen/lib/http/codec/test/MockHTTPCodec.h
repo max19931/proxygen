@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <folly/portability/GMock.h>
@@ -91,6 +90,11 @@ class MockHTTPCodec: public HTTPCodec {
   }
 
   MOCK_METHOD1(generatePingRequest, size_t(folly::IOBufQueue&));
+  size_t generatePingRequest(folly::IOBufQueue& writeBuf,
+                             folly::Optional<uint64_t> /* data */) override {
+    return generatePingRequest(writeBuf);
+  }
+
   MOCK_METHOD2(generatePingReply, size_t(folly::IOBufQueue&,
                                          uint64_t));
   MOCK_METHOD1(generateSettings, size_t(folly::IOBufQueue&));

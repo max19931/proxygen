@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/compress/test/HTTPArchive.h>
 
 #include <algorithm>
@@ -159,11 +158,11 @@ unique_ptr<HTTPArchive> HTTPArchive::fromFile(const string& filename) {
                                      entries[i]["startedDateTime"].asString(),
                                      true);
     if (msg.getHeaders().size() != 0) {
-      har->requests.push_back(msg);
+      har->requests.emplace_back(std::move(msg));
     }
     msg = extractMessage(entries[i]["response"], "", false);
     if (msg.getHeaders().size() != 0) {
-      har->responses.push_back(msg);
+      har->responses.emplace_back(std::move(msg));
     }
   }
 

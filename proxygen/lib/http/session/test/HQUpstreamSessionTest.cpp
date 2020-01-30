@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2019-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/session/HQUpstreamSession.h>
 
 #include <folly/futures/Future.h>
@@ -19,7 +18,6 @@
 #include <proxygen/lib/http/codec/HQUnidirectionalCodec.h>
 #include <proxygen/lib/http/codec/HTTP1xCodec.h>
 #include <proxygen/lib/http/codec/test/TestUtils.h>
-#include <proxygen/lib/http/session/HQStreamLookup.h>
 #include <proxygen/lib/http/session/test/HQSessionMocks.h>
 #include <proxygen/lib/http/session/test/HQSessionTestCommon.h>
 #include <proxygen/lib/http/session/test/HTTPSessionMocks.h>
@@ -35,7 +33,6 @@ using namespace quic;
 using namespace folly;
 using namespace testing;
 using namespace std::chrono;
-using std::unique_ptr;
 
 namespace {
 constexpr quic::StreamId kQPACKEncoderIngressStreamId = 7;
@@ -548,6 +545,18 @@ TEST_P(HQUpstreamSessionTest, DropFromConnectError) {
   eventBase_.loop();
 }
 
+TEST_P(HQUpstreamSessionTest, FirstPeerPacketProcessed) {
+  MockConnectCallback connectCb;
+  HQUpstreamSession* upstreamSess =
+      dynamic_cast<HQUpstreamSession*>(hqSession_);
+  upstreamSess->setConnectCallback(&connectCb);
+  EXPECT_CALL(connectCb, onFirstPeerPacketProcessed());
+  upstreamSess->onFirstPeerPacketProcessed();
+
+  upstreamSess->closeWhenIdle();
+  eventBase_.loopOnce();
+}
+
 TEST_P(HQUpstreamSessionTest, NotifyReplaySafeAfterTransportReady) {
   MockConnectCallback connectCb;
   HQUpstreamSession* upstreamSess =
@@ -829,6 +838,31 @@ TEST_P(HQUpstreamSessionTestHQ, TestDropConnectionSynchronously) {
   hqSession_->dropConnection();
   infoCb.reset();
   eventBase_.loopOnce();
+}
+
+TEST_P(HQUpstreamSessionTestHQ, TestOnStopSendingHTTPRequestRejected) {
+  auto handler = openTransaction();
+  auto streamId = handler->txn_->getID();
+  handler->txn_->sendHeaders(getGetRequest());
+  eventBase_.loopOnce();
+  EXPECT_CALL(*socketDriver_->getSocket(),
+              resetStream(streamId, HTTP3::ErrorCode::HTTP_REQUEST_CANCELLED))
+      .Times(2) // See comment in HTTPSession::handleWriteError
+      .WillRepeatedly(
+          Invoke([&](quic::StreamId id, quic::ApplicationErrorCode) {
+            // setWriteError will cancaleDeliveryCallbacks which will invoke
+            // onCanceled to decrementPendingByteEvents on the txn.
+            socketDriver_->setWriteError(id);
+            return folly::unit;
+          }));
+  EXPECT_CALL(*handler, onError(_))
+      .Times(1)
+      .WillOnce(Invoke([](HTTPException ex) {
+        EXPECT_EQ(kErrorStreamUnacknowledged, ex.getProxygenError());
+      }));
+  handler->expectDetachTransaction();
+  hqSession_->onStopSending(streamId, HTTP3::ErrorCode::HTTP_REQUEST_REJECTED);
+  hqSession_->closeWhenIdle();
 }
 
 // This test is checking two different scenarios for different protocol
@@ -1245,6 +1279,19 @@ class HQUpstreamSessionTestHQPush : public HQUpstreamSessionTest {
         nextUnidirectionalStreamId(), pushId, prefaceBytes, eom);
   }
 
+  std::unique_ptr<MockHTTPHandler> expectPushResponse() {
+    auto pushHandler = std::make_unique<MockHTTPHandler>();
+    pushHandler->expectTransaction();
+    assocHandler_->expectPushedTransaction(pushHandler.get());
+    // Promise/Response - with no lambda it lacks RetiresOnSaturation
+    pushHandler->expectHeaders([] (std::shared_ptr<HTTPMessage>) {});
+    pushHandler->expectHeaders([] (std::shared_ptr<HTTPMessage>) {});
+    pushHandler->expectBody();
+    pushHandler->expectEOM();
+    pushHandler->expectDetachTransaction();
+    return pushHandler;
+  }
+
   proxygen::HTTPHeaderSize lastPushPromiseHeadersSize_;
   hq::PushId nextPushId_;
   std::unique_ptr<StrictMock<MockHTTPHandler>> assocHandler_;
@@ -1262,7 +1309,6 @@ TEST_P(HQUpstreamSessionTestHQPush, TestPushPromiseCallbacksInvoked) {
   assocHandler_->expectError([&](const HTTPException& ex) {
     ASSERT_EQ(ex.getProxygenError(), kErrorTimeout);
   });
-  assocHandler_->expectPushedTransaction();
 
   hq::PushId pushId = nextPushId();
 
@@ -1319,6 +1365,8 @@ TEST_P(HQUpstreamSessionTestHQPush, TestPushPromiseCallbacksInvoked) {
 
   assocHandler_->txn_->sendEOM();
 
+  auto pushHandler = expectPushResponse();
+
   hqSession_->closeWhenIdle();
   flushAndLoop();
 }
@@ -1373,7 +1421,6 @@ TEST_P(HQUpstreamSessionTestHQPush, TestPushPromiseFollowedByPushStream) {
   // the transaction is expected to timeout, since the PushPromise does not have
   // EOF set, and it is not followed by a PushStream.
   assocHandler_->expectError();
-  assocHandler_->expectPushedTransaction();
 
   hq::PushId pushId = nextPushId();
 
@@ -1432,6 +1479,8 @@ TEST_P(HQUpstreamSessionTestHQPush, TestPushPromiseFollowedByPushStream) {
 
   assocHandler_->txn_->sendEOM();
 
+  auto pushHandler = expectPushResponse();
+
   hqSession_->closeWhenIdle();
   flushAndLoop();
 }
@@ -1459,9 +1508,9 @@ TEST_P(HQUpstreamSessionTestHQPush, TestOnPushedTransaction) {
 
   // Once both push promise and push stream have been received, a push
   // transaction should be created
-  assocHandler_->expectPushedTransaction();
-
   assocHandler_->txn_->sendEOM();
+
+  auto pushHandler = expectPushResponse();
 
   hqSession_->closeWhenIdle();
   flushAndLoop();
@@ -1488,7 +1537,7 @@ TEST_P(HQUpstreamSessionTestHQPush, TestOnPushedTransactionOutOfOrder) {
 
   // Once both push promise and push stream have been received, a push
   // transaction should be created
-  assocHandler_->expectPushedTransaction();
+  auto pushHandler = expectPushResponse();
 
   assocHandler_->txn_->sendEOM();
 

@@ -1,4 +1,10 @@
-// Copyright 2004-present Facebook. All Rights Reserved.
+/*
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
 
 #include <proxygen/httpserver/samples/hq/PartiallyReliableCurlClient.h>
 
@@ -43,7 +49,7 @@ void PartiallyReliableCurlClient::onError(
 }
 
 void PartiallyReliableCurlClient::onBodyPeek(
-    uint64_t offset, const folly::IOBufQueue& /* chain */) noexcept {
+    uint64_t offset, const folly::IOBuf& /* chain */) noexcept {
   LOG_IF(INFO, loggingEnabled_)
       << "Got " << __func__ << " at offset " << offset;
 }

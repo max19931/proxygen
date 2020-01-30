@@ -1,23 +1,24 @@
 #!/usr/bin/env python
-# Copyright (c) 2019-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import io
+import os
 
 from .builder import (
     AutoconfBuilder,
     Boost,
+    CargoBuilder,
     CMakeBuilder,
     Iproute2Builder,
     MakeBuilder,
     NinjaBootstrap,
     NopBuilder,
+    OpenNSABuilder,
     OpenSSLBuilder,
     SqliteBuilder,
 )
@@ -28,6 +29,7 @@ from .fetcher import (
     ShipitTransformerFetcher,
     SimpleShipitTransformerFetcher,
 )
+from .py_wheel_builder import PythonWheelBuilder
 
 
 try:
@@ -49,6 +51,7 @@ SCHEMA = {
         },
     },
     "dependencies": {"optional_section": True, "allow_values": False},
+    "depends.environment": {"optional_section": True},
     "git": {
         "optional_section": True,
         "fields": {"repo_url": REQUIRED, "rev": OPTIONAL, "depth": OPTIONAL},
@@ -66,8 +69,10 @@ SCHEMA = {
         },
     },
     "msbuild": {"optional_section": True, "fields": {"project": REQUIRED}},
+    "cargo": {"optional_section": True, "fields": {"build_doc": OPTIONAL}},
     "cmake.defines": {"optional_section": True},
     "autoconf.args": {"optional_section": True},
+    "b2.args": {"optional_section": True},
     "make.args": {"optional_section": True},
     "header-only": {"optional_section": True, "fields": {"includedir": REQUIRED}},
     "shipit.pathmap": {"optional_section": True},
@@ -83,6 +88,7 @@ ALLOWED_EXPR_SECTIONS = [
     "cmake.defines",
     "dependencies",
     "make.args",
+    "b2.args",
     "download",
     "git",
     "install.files",
@@ -91,7 +97,7 @@ ALLOWED_EXPR_SECTIONS = [
 
 def parse_conditional_section_name(name, section_def):
     expr = name[len(section_def) + 1 :]
-    return parse_expr(expr)
+    return parse_expr(expr, ManifestContext.ALLOWED_VARIABLES)
 
 
 def validate_allowed_fields(file_name, section, config, allowed_fields):
@@ -165,8 +171,9 @@ class ManifestParser(object):
         if fp is None:
             with open(file_name, "r") as fp:
                 config.readfp(fp)
-        elif isinstance(fp, str):
-            # For testing purposes, parse from a string
+        elif isinstance(fp, type("")):
+            # For testing purposes, parse from a string (str
+            # or unicode)
             config.readfp(io.StringIO(fp))
         else:
             config.readfp(fp)
@@ -193,6 +200,12 @@ class ManifestParser(object):
         self.fbsource_path = self.get("manifest", "fbsource_path")
         self.shipit_project = self.get("manifest", "shipit_project")
         self.shipit_fbcode_builder = self.get("manifest", "shipit_fbcode_builder")
+
+        if self.name != os.path.basename(file_name):
+            raise Exception(
+                "filename of the manifest '%s' does not match the manifest name '%s'"
+                % (file_name, self.name)
+            )
 
     def get(self, section, key, defval=None, ctx=None):
         ctx = ctx or {}
@@ -348,10 +361,10 @@ class ManifestParser(object):
                 )
 
         raise KeyError(
-            "project %s has no fetcher configuration matching %r" % (self.name, ctx)
+            "project %s has no fetcher configuration matching %s" % (self.name, ctx)
         )
 
-    def create_builder(self, build_options, src_dir, build_dir, inst_dir, ctx):
+    def create_builder(self, build_options, src_dir, build_dir, inst_dir, ctx, loader):
         builder = self.get("build", "builder", ctx=ctx)
         if not builder:
             raise Exception("project %s has no builder for %r" % (self.name, ctx))
@@ -371,12 +384,18 @@ class ManifestParser(object):
             )
 
         if builder == "boost":
-            return Boost(build_options, ctx, self, src_dir, build_dir, inst_dir)
+            args = self.get_section_as_args("b2.args", ctx)
+            return Boost(build_options, ctx, self, src_dir, build_dir, inst_dir, args)
 
         if builder == "cmake":
             defines = self.get_section_as_dict("cmake.defines", ctx)
             return CMakeBuilder(
                 build_options, ctx, self, src_dir, build_dir, inst_dir, defines
+            )
+
+        if builder == "python-wheel":
+            return PythonWheelBuilder(
+                build_options, ctx, self, src_dir, build_dir, inst_dir
             )
 
         if builder == "sqlite":
@@ -400,4 +419,76 @@ class ManifestParser(object):
                 build_options, ctx, self, src_dir, build_dir, inst_dir
             )
 
+        if builder == "cargo":
+            build_doc = self.get("cargo", "build_doc", False, ctx)
+            return CargoBuilder(
+                build_options,
+                ctx,
+                self,
+                src_dir,
+                build_dir,
+                inst_dir,
+                build_doc,
+                loader,
+            )
+
+        if builder == "OpenNSA":
+            return OpenNSABuilder(build_options, ctx, self, src_dir, inst_dir)
+
         raise KeyError("project %s has no known builder" % (self.name))
+
+
+class ManifestContext(object):
+    """ ProjectContext contains a dictionary of values to use when evaluating boolean
+    expressions in a project manifest.
+
+    This object should be passed as the `ctx` parameter in ManifestParser.get() calls.
+    """
+
+    ALLOWED_VARIABLES = {"os", "distro", "distro_vers", "fb", "test"}
+
+    def __init__(self, ctx_dict):
+        assert set(ctx_dict.keys()) == self.ALLOWED_VARIABLES
+        self.ctx_dict = ctx_dict
+
+    def get(self, key):
+        return self.ctx_dict[key]
+
+    def set(self, key, value):
+        assert key in self.ALLOWED_VARIABLES
+        self.ctx_dict[key] = value
+
+    def copy(self):
+        return ManifestContext(dict(self.ctx_dict))
+
+    def __str__(self):
+        s = ", ".join(
+            "%s=%s" % (key, value) for key, value in sorted(self.ctx_dict.items())
+        )
+        return "{" + s + "}"
+
+
+class ContextGenerator(object):
+    """ ContextGenerator allows creating ManifestContext objects on a per-project basis.
+    This allows us to evaluate different projects with slightly different contexts.
+
+    For instance, this can be used to only enable tests for some projects. """
+
+    def __init__(self, default_ctx):
+        self.default_ctx = ManifestContext(default_ctx)
+        self.ctx_by_project = {}
+
+    def set_value_for_project(self, project_name, key, value):
+        project_ctx = self.ctx_by_project.get(project_name)
+        if project_ctx is None:
+            project_ctx = self.default_ctx.copy()
+            self.ctx_by_project[project_name] = project_ctx
+        project_ctx.set(key, value)
+
+    def set_value_for_all_projects(self, key, value):
+        self.default_ctx.set(key, value)
+        for ctx in self.ctx_by_project.values():
+            ctx.set(key, value)
+
+    def get_context(self, project_name):
+        return self.ctx_by_project.get(project_name, self.default_ctx)

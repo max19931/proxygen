@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <folly/Expected.h>
@@ -32,8 +31,9 @@ class SimStreamingCallback : public HPACK::StreamingCallback {
     std::swap(headersCompleteCb, goner.headersCompleteCb);
   }
 
-  void onHeader(const folly::fbstring& name,
+  void onHeader(const HPACKHeaderName& hname,
                 const folly::fbstring& value) override {
+    std::string name = hname.get();
     if (name[0] == ':' && !isPublic) {
       if (name == headers::kMethod) {
         msg.setMethod(value);
@@ -51,7 +51,7 @@ class SimStreamingCallback : public HPACK::StreamingCallback {
         DCHECK(false) << "Bad header name=" << name << " value=" << value;
       }
     } else {
-      msg.getHeaders().add(name.toStdString(), value.toStdString());
+      msg.getHeaders().add(name, value.toStdString());
     }
   }
 

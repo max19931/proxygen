@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <wangle/ssl/SSLContextConfig.h>
@@ -163,6 +162,9 @@ class HTTPServer final {
    * Updates ticket seeds for the HTTPServer for all the VIPs.
    */
   void updateTicketSeeds(wangle::TLSTicketKeySeeds seeds);
+
+ protected:
+  folly::Expected<folly::Unit, std::exception_ptr> startTcpServer();
 
  private:
   std::shared_ptr<HTTPServerOptions> options_;

@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <atomic>
@@ -131,10 +130,13 @@ class WorkerThread {
 
   void runLoop();
 
+  // Ensure eventBase_ is first among class members so that it is also
+  // destroyed first and thus other members are valid at the time of
+  // destruction.
+  folly::EventBase eventBase_;
   State state_{State::IDLE};
   std::thread thread_;
   std::mutex joinLock_;
-  folly::EventBase eventBase_;
   folly::EventBaseManager* eventBaseManager_{nullptr};
 
   // A thread-local pointer to the current WorkerThread for this thread

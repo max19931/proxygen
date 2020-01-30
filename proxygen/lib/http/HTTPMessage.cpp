@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/HTTPMessage.h>
 
 #include <boost/algorithm/string.hpp>
@@ -16,18 +15,11 @@
 #include <string>
 #include <vector>
 
-using folly::IOBuf;
-using folly::Optional;
 using folly::StringPiece;
 using std::pair;
 using std::string;
-using std::unique_ptr;
 
 namespace {
-const string kHeaderStr_ = "header.";
-const string kQueryStr_ = "query.";
-const string kCookieStr = "cookie.";
-
 /**
  * Create a C locale once and pass it to all the boost string methods
  * that would otherwise create and destruct a temporary locale object
@@ -50,7 +42,11 @@ void HTTPMessage::stripPerHopHeaders() {
   // Some code paths end up recyling a single HTTPMessage instance for multiple
   // requests, and adding their own per-hop headers each time. In that case, we
   // don't want to accumulate these headers.
-  strippedPerHopHeaders_.removeAll();
+  if (!strippedPerHopHeaders_) {
+    strippedPerHopHeaders_ = std::make_unique<HTTPHeaders>();
+  } else {
+    strippedPerHopHeaders_->removeAll();
+  }
 
   if (!trailersAllowed_) {
     // Because stripPerHopHeaders can be called multiple times, don't
@@ -58,7 +54,7 @@ void HTTPMessage::stripPerHopHeaders() {
     trailersAllowed_ = checkForHeaderToken(HTTP_HEADER_TE, "trailers", false);
   }
 
-  headers_.stripPerHopHeaders(strippedPerHopHeaders_);
+  headers_.stripPerHopHeaders(*strippedPerHopHeaders_);
 }
 
 HTTPMessage::HTTPMessage() :
@@ -91,7 +87,6 @@ HTTPMessage::HTTPMessage(const HTTPMessage& message) :
     queryParams_(message.queryParams_),
     version_(message.version_),
     headers_(message.headers_),
-    strippedPerHopHeaders_(message.strippedPerHopHeaders_),
     sslVersion_(message.sslVersion_),
     sslCipher_(message.sslCipher_),
     protoStr_(message.protoStr_),
@@ -106,6 +101,13 @@ HTTPMessage::HTTPMessage(const HTTPMessage& message) :
     secure_(message.secure_),
     partiallyReliable_(message.partiallyReliable_),
     upgradeWebsocket_(message.upgradeWebsocket_) {
+  if (isRequest()) {
+    setURL(request().url_);
+  }
+  if (message.strippedPerHopHeaders_) {
+    strippedPerHopHeaders_ = std::make_unique<HTTPHeaders>(
+      *message.strippedPerHopHeaders_);
+  }
   if (message.trailers_) {
     trailers_ = std::make_unique<HTTPHeaders>(*message.trailers_);
   }
@@ -140,6 +142,9 @@ HTTPMessage::HTTPMessage(HTTPMessage&& message) noexcept :
     secure_(message.secure_),
     partiallyReliable_(message.partiallyReliable_),
     upgradeWebsocket_(message.upgradeWebsocket_) {
+  if (isRequest()) {
+    setURL(request().url_);
+  }
 }
 
 HTTPMessage& HTTPMessage::operator=(const HTTPMessage& message) {
@@ -154,11 +159,19 @@ HTTPMessage& HTTPMessage::operator=(const HTTPMessage& message) {
   localIP_ = message.localIP_;
   versionStr_ = message.versionStr_;
   fields_ = message.fields_;
+  if (isRequest()) {
+    setURL(request().url_);
+  }
   cookies_ = message.cookies_;
   queryParams_ = message.queryParams_;
   version_ = message.version_;
   headers_ = message.headers_;
-  strippedPerHopHeaders_ = message.strippedPerHopHeaders_;
+  if (message.strippedPerHopHeaders_) {
+    strippedPerHopHeaders_ = std::make_unique<HTTPHeaders>(
+      *message.strippedPerHopHeaders_);
+  } else {
+    strippedPerHopHeaders_.reset();
+  }
   sslVersion_ = message.sslVersion_;
   sslCipher_ = message.sslCipher_;
   protoStr_ = message.protoStr_;
@@ -193,6 +206,9 @@ HTTPMessage& HTTPMessage::operator=(HTTPMessage&& message) {
   localIP_ = std::move(message.localIP_);
   versionStr_ = std::move(message.versionStr_);
   fields_ = std::move(message.fields_);
+  if (isRequest()) {
+    setURL(request().url_);
+  }
   cookies_ = std::move(message.cookies_);
   queryParams_ = std::move(message.queryParams_);
   version_ = message.version_;
@@ -211,7 +227,6 @@ HTTPMessage& HTTPMessage::operator=(HTTPMessage&& message) {
   trailersAllowed_ = message.trailersAllowed_;
   secure_ = message.secure_;
   upgradeWebsocket_ = message.upgradeWebsocket_;
-
   trailers_ = std::move(message.trailers_);
   return *this;
 }
@@ -259,7 +274,15 @@ const std::string& HTTPMessage::getMethodString() const {
 void HTTPMessage::setHTTPVersion(uint8_t maj, uint8_t min) {
   version_.first = maj;
   version_.second = min;
-  versionStr_ = folly::to<string>(maj, ".", min);
+  if (version_.first >= 10 || version_.second >= 10) {
+    versionStr_ = folly::to<std::string>(maj, '.', min);
+  } else {
+    versionStr_.reserve(3);
+    versionStr_.clear();
+    versionStr_.append(1, maj + '0');
+    versionStr_.append(1, '.');
+    versionStr_.append(1, min + '0');
+  }
 }
 
 const pair<uint8_t, uint8_t>& HTTPMessage::getHTTPVersion() const {
@@ -273,7 +296,7 @@ int HTTPMessage::processMaxForwards() {
       int64_t max_forwards = 0;
       try {
         max_forwards = folly::to<int64_t>(value);
-      } catch (const std::range_error& ex) {
+      } catch (const std::range_error&) {
         return 400;
       }
 
@@ -346,11 +369,10 @@ uint16_t HTTPMessage::getStatusCode() const {
 
 void HTTPMessage::setPushStatusCode(uint16_t status) {
   request().pushStatus_ = status;
-  request().pushStatusStr_ = folly::to<string>(status);
 }
 
-const std::string& HTTPMessage::getPushStatusStr() const{
-  return request().pushStatusStr_;
+std::string HTTPMessage::getPushStatusStr() const{
+  return folly::to<string>(request().pushStatus_);
 }
 
 uint16_t HTTPMessage::getPushStatusCode() const{
@@ -476,7 +498,7 @@ int HTTPMessage::getIntQueryParam(const std::string& name) const {
 int HTTPMessage::getIntQueryParam(const std::string& name, int defval) const {
   try {
     return getIntQueryParam(name);
-  } catch (const std::exception& ex) {
+  } catch (const std::exception&) {
   }
 
   return defval;
@@ -503,20 +525,24 @@ const std::map<std::string, std::string>& HTTPMessage::getQueryParams() const {
 }
 
 bool HTTPMessage::setQueryString(const std::string& query) {
+  return setQueryStringImpl(query, true);
+}
+
+bool HTTPMessage::setQueryStringImpl(const std::string& query, bool unparse) {
   ParseURL u(request().url_);
 
   if (u.valid()) {
     // Recreate the URL by just changing the query string
-    request().url_ = createUrl(u.scheme(),
-                               u.authority(),
-                               u.path(),
-                               query, // new query string
-                               u.fragment());
-    request().query_ = query;
+    setURLImpl(createUrl(u.scheme(),
+                         u.authority(),
+                         u.path(),
+                         query, // new query string
+                         u.fragment()), unparse);
     return true;
   }
 
-  VLOG(4) << "Error parsing URL during setQueryString: " << request().url_;
+  VLOG(4) << "Error parsing URL during setQueryString: "
+          << request().url_;
   return false;
 }
 
@@ -531,8 +557,8 @@ bool HTTPMessage::removeQueryParam(const std::string& name) {
     return false;
   }
 
-  auto query = createQueryString(queryParams_, request().query_.length());
-  return setQueryString(query);
+  auto query = createQueryString(queryParams_, request().query_.size());
+  return setQueryStringImpl(query, false);
 }
 
 bool HTTPMessage::setQueryParam(const std::string& name,
@@ -543,8 +569,8 @@ bool HTTPMessage::setQueryParam(const std::string& name,
   }
 
   queryParams_[name] = value;
-  auto query = createQueryString(queryParams_, request().query_.length());
-  return setQueryString(query);
+  auto query = createQueryString(queryParams_, request().query_.size());
+  return setQueryStringImpl(query, false);
 }
 
 std::string HTTPMessage::createQueryString(
@@ -584,12 +610,11 @@ std::string HTTPMessage::createUrl(const folly::StringPiece scheme,
 }
 
 void HTTPMessage::splitNameValuePieces(
-        const string& input,
+        folly::StringPiece sp,
         char pairDelim,
         char valueDelim,
         std::function<void(StringPiece, StringPiece)> callback) {
 
-  StringPiece sp(input);
   while (!sp.empty()) {
     size_t pairDelimPos = sp.find(pairDelim);
     StringPiece keyValue;
@@ -629,7 +654,7 @@ StringPiece HTTPMessage::trim(StringPiece sp) {
 }
 
 void HTTPMessage::splitNameValue(
-        const string& input,
+        folly::StringPiece input,
         char pairDelim,
         char valueDelim,
         std::function<void(string&&, string&&)> callback) {
@@ -688,47 +713,62 @@ void HTTPMessage::describe(std::ostream& os) const {
      << ", Fields for message:" << std::endl;
 
   // Common fields to both requests and responses.
-  std::vector<std::pair<const char*, const std::string*>> fields {{
-      {"local_ip", &localIP_},
-      {"version", &versionStr_},
-      {"dst_ip", &dstIP_},
-      {"dst_port", &dstPort_},
+  std::vector<std::pair<const char*, folly::StringPiece>> fields {{
+      {"local_ip", localIP_},
+      {"version", versionStr_},
+      {"dst_ip", dstIP_},
+      {"dst_port", dstPort_},
   }};
 
-  if (fields_.type() == typeid(Request)) {
+  std::string pushStatusMessage;
+  if (isRequest()) {
     // Request fields.
     const Request& req = request();
-    fields.push_back(make_pair("client_ip", &req.clientIP_));
-    fields.push_back(make_pair("client_port", &req.clientPort_));
-    fields.push_back(make_pair("method", &getMethodString()));
-    fields.push_back(make_pair("path", &req.path_));
-    fields.push_back(make_pair("query", &req.query_));
-    fields.push_back(make_pair("url", &req.url_));
-    fields.push_back(make_pair("push_status", &req.pushStatusStr_));
-  } else if (fields_.type() == typeid(Response)) {
+    pushStatusMessage = getPushStatusStr();
+    fields.insert(fields.end(), {
+        { "client_ip", req.clientIP_ ? *req.clientIP_ : empty_string },
+        { "client_port", req.clientPort_ ? *req.clientPort_ : empty_string },
+        { "method", getMethodString() },
+        { "path", req.path_ },
+        { "query", req.query_ },
+        { "url", req.url_ },
+        { "push_status", pushStatusMessage }
+      });
+
+  } else if (isResponse()) {
     // Response fields.
     const Response& resp = response();
-    fields.push_back(make_pair("status", &resp.statusStr_));
-    fields.push_back(make_pair("status_msg", &resp.statusMsg_));
+    fields.insert(fields.end(), {
+        { "status", resp.statusStr_ },
+        { "status_msg", resp.statusMsg_ }
+      });
   }
 
-  for (auto field : fields) {
-    if (!field.second->empty()) {
+  for (auto& field : fields) {
+    if (!field.second.empty()) {
       os << " " << field.first
-         << ":" << stripCntrlChars(*field.second) << std::endl;
+         << ":" << stripCntrlChars(field.second) << std::endl;
     }
   }
 
-  headers_.forEach([&] (const string& h, const string& v) {
-      os << " " << stripCntrlChars(h) << ": "
-         << stripCntrlChars(v) << std::endl;
-    });
-  if (strippedPerHopHeaders_.size() > 0) {
-    os << "Per-Hop Headers" << std::endl;
-    strippedPerHopHeaders_.forEach([&] (const string& h, const string& v) {
+  // This little loop prints the headers and (if present) any per-hop headers
+  // that were stripped.  It executes at most twice.
+  bool first = true;
+  const HTTPHeaders* hdrs = &headers_;
+  while (hdrs) {
+    if (!first && hdrs->size() != 0) {
+      os << "Per-Hop Headers" << std::endl;
+    }
+    hdrs->forEach([&os] (const string& h, const string& v) {
         os << " " << stripCntrlChars(h) << ": "
            << stripCntrlChars(v) << std::endl;
       });
+    if (first) {
+      hdrs = strippedPerHopHeaders_.get();
+      first = false;
+    } else {
+      hdrs = nullptr;
+    }
   }
 }
 
@@ -771,10 +811,11 @@ bool HTTPMessage::computeKeepalive() const {
       // header to be present for the connection to be persistent.
       if (checkForHeaderToken(
               HTTP_HEADER_CONNECTION, kKeepAliveConnToken.c_str(), false) ||
-          doHeaderTokenCheck(strippedPerHopHeaders_,
-                             HTTP_HEADER_CONNECTION,
-                             kKeepAliveConnToken.c_str(),
-                             false)) {
+          (strippedPerHopHeaders_ &&
+           doHeaderTokenCheck(*strippedPerHopHeaders_,
+                              HTTP_HEADER_CONNECTION,
+                              kKeepAliveConnToken.c_str(),
+                              false))) {
         return true;
       }
       return false;
@@ -794,94 +835,21 @@ bool HTTPMessage::doHeaderTokenCheck(const HTTPHeaders& headers,
                                      const HTTPHeaderCode headerCode,
                                      char const* token,
                                      bool caseSensitive) const {
-  StringPiece tokenPiece(token);
-  string lowerToken;
-  if (!caseSensitive) {
-    lowerToken = token;
-    boost::to_lower(lowerToken, defaultLocale);
-    tokenPiece.reset(lowerToken);
-  }
-
-  // Search through all of the headers with this name.
-  // forEachValueOfHeader will return true iff it was "broken" prematurely
-  // with "return true" in the lambda-function
   return headers.forEachValueOfHeader(headerCode, [&] (const string& value) {
-    string lower;
-    // Use StringPiece, since it implements a faster find() than std::string
-    StringPiece headerValue;
-    if (caseSensitive) {
-      headerValue.reset(value);
-    } else {
-      // TODO: We only perform ASCII lowering right now.  Technically the
-      // headers could contain data in other encodings, if encoded according
-      // to RFC 2047 (encoded strings will start with "=?").
-      lower = value;
-      boost::to_lower(lower, defaultLocale);
-      headerValue.reset(lower);
-    }
-
-    // Look for the specified token
-    size_t idx = 0;
-    size_t end = headerValue.size();
-    while (idx < end) {
-      idx = headerValue.find(tokenPiece, idx);
-      if (idx == string::npos) {
-        break;
-      }
-
-      // Search backwards to make sure we found the value at the beginning
-      // of a token.
-      bool at_token_start = false;
-      size_t prev = idx;
-      while (true) {
-        if (prev == 0) {
-          at_token_start = true;
-          break;
-        }
-        --prev;
-        char c = headerValue[prev];
-        if (c == ',') {
-          at_token_start = true;
-          break;
-        }
-        if (!isLWS(c)) {
-          // not at a token start
-          break;
+      std::vector<folly::StringPiece> tokens;
+      folly::split(",", value, tokens);
+      for (auto t: tokens) {
+        t = trim(t);
+        if (caseSensitive) {
+          if (t == token) {
+            return true;
+          }
+        } else if (caseInsensitiveEqual(t, token)) {
+          return true;
         }
       }
-      if (!at_token_start) {
-        idx += 1;
-        continue;
-      }
-
-      // Search forwards to see if we found the value at the end of a token
-      bool at_token_end = false;
-      size_t next = idx + tokenPiece.size();
-      while (true) {
-        if (next >= end) {
-          at_token_end = true;
-          break;
-        }
-        char c = headerValue[next];
-        if (c == ',') {
-          at_token_end = true;
-          break;
-        }
-        if (!isLWS(c)) {
-          // not at a token end
-          break;
-        }
-        ++next;
-      }
-      if (at_token_end) {
-        // We found the token we're looking for
-        return true;
-      }
-
-      idx += 1;
-    }
-    return false; // keep processing
-  });
+      return false;
+    });
 }
 
 const char* HTTPMessage::getDefaultReason(uint16_t status) {
@@ -932,6 +900,27 @@ const char* HTTPMessage::getDefaultReason(uint16_t status) {
   // Note: Some Microsoft clients behave badly if the reason string
   // is left empty.  Therefore return a non-empty string here.
   return "-";
+}
+
+ParseURL HTTPMessage::setURLImplInternal(bool unparse) {
+  auto& req = request();
+  ParseURL u(req.url_);
+  if (u.valid()) {
+    VLOG(9) << "set path: " << u.path() << " query:"
+            << u.query();
+    req.path_ = u.path();
+    req.query_ = u.query();
+  } else {
+    VLOG(4) << "Error in parsing URL: " << req.url_;
+    req.path_.clear();
+    req.query_.clear();
+  }
+  req.pathStr_ = folly::none;
+  req.queryStr_ = folly::none;
+  if (unparse) {
+    unparseQueryParams();
+  }
+  return u;
 }
 
 } // proxygen

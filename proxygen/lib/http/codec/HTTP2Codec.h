@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <proxygen/lib/http/codec/HeaderDecodeInfo.h>
@@ -28,7 +27,7 @@ namespace proxygen {
  */
 class HTTP2Codec: public HTTPParallelCodec, HPACK::StreamingCallback {
 public:
-  void onHeader(const folly::fbstring& name,
+  void onHeader(const HPACKHeaderName& name,
                 const folly::fbstring& value) override;
   void onHeadersComplete(HTTPHeaderSize decodedSize, bool acknowledge) override;
   void onDecodeError(HPACK::DecodeError decodeError) override;
@@ -92,9 +91,10 @@ public:
     StreamID lastStream,
     ErrorCode statusCode,
     std::unique_ptr<folly::IOBuf> debugData = nullptr) override;
-  size_t generatePingRequest(folly::IOBufQueue& writeBuf) override;
+  size_t generatePingRequest(folly::IOBufQueue& writeBuf,
+                         folly::Optional<uint64_t> data = folly::none) override;
   size_t generatePingReply(folly::IOBufQueue& writeBuf,
-                           uint64_t uniqueID) override;
+                           uint64_t data) override;
   size_t generateSettings(folly::IOBufQueue& writeBuf) override;
   size_t generateSettingsAck(folly::IOBufQueue& writeBuf) override;
   size_t generateWindowUpdate(folly::IOBufQueue& writeBuf,
@@ -175,7 +175,20 @@ public:
     return headerCodec_.getHeaderIndexingStrategy();
   }
 
+  void setAddDateHeaderToResponse(bool addDateHeader) {
+    addDateToResponse_ = addDateHeader;
+  }
+
+  void setValidateHeaders(bool validate) {
+    validateHeaders_ = validate;
+  }
+
  private:
+  size_t splitCompressed(size_t compressed,
+                         uint32_t remainingFrameSize,
+                         folly::IOBufQueue& writeBuf,
+                         folly::IOBufQueue& queue);
+
   void generateHeaderImpl(folly::IOBufQueue& writeBuf,
                           StreamID stream,
                           const HTTPMessage& msg,
@@ -183,7 +196,8 @@ public:
                           const folly::Optional<ExAttributes>& exAttributes,
                           bool eom,
                           HTTPHeaderSize* size);
-  std::unique_ptr<folly::IOBuf> encodeHeaders(
+  void encodeHeaders(
+      folly::IOBufQueue& writeBuf,
       const HTTPHeaders& headers,
       std::vector<compress::Header>& allHeaders,
       HTTPHeaderSize* size);
@@ -292,6 +306,8 @@ public:
   // Applies only to DOWNSTREAM, for UPSTREAM we use
   // diffrent heuristic - lack of status code.
   bool parsingDownstreamTrailers_{false};
+  bool addDateToResponse_{true};
+  bool validateHeaders_{true};
 
   // CONTINUATION frame can follow either HEADERS or PUSH_PROMISE frames.
   // Keeps frame type of iniating frame of header block.

@@ -1,17 +1,17 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <fizz/record/Types.h>
 #include <folly/io/IOBuf.h>
 #include <folly/io/async/SSLContext.h>
+#include <folly/io/async/AsyncUDPSocket.h>
 #include <proxygen/lib/http/codec/HTTPCodecFilter.h>
 #include <proxygen/lib/http/session/HTTPTransaction.h>
 #include <proxygen/lib/utils/Time.h>
@@ -25,6 +25,7 @@ class HTTPTransaction;
 class ByteEventTracker;
 
 constexpr uint32_t kDefaultMaxConcurrentOutgoingStreams = 100;
+constexpr int kRttAlpha = 8;
 
 class HTTPPriorityMapFactoryProvider {
  public:
@@ -34,7 +35,6 @@ class HTTPPriorityMapFactoryProvider {
 
 class HTTPSessionBase : public wangle::ManagedConnection {
  public:
-  enum class SessionType { HTTP, HQ };
 
   /**
    * Optional callback interface that the HTTPSessionBase
@@ -154,7 +154,7 @@ class HTTPSessionBase : public wangle::ManagedConnection {
     sessionStats_ = stats;
   }
 
-  virtual SessionType getType() const noexcept = 0;
+  virtual HTTPTransaction::Transport::Type getType() const noexcept = 0;
 
   virtual folly::AsyncTransportWrapper* getTransport() = 0;
 
@@ -177,6 +177,8 @@ class HTTPSessionBase : public wangle::ManagedConnection {
   bool supportsMoreTransactions() const {
     return (getNumOutgoingStreams() < getMaxConcurrentOutgoingStreams());
   }
+
+  virtual uint32_t getNumStreams() const = 0;
 
   virtual uint32_t getNumOutgoingStreams() const = 0;
 
@@ -247,6 +249,33 @@ class HTTPSessionBase : public wangle::ManagedConnection {
 
   virtual bool getHTTP2PrioritiesEnabled() const {
     return h2PrioritiesEnabled_;
+  }
+
+  /**
+   * Turn HTTP2 Ping-based RTT measure on/off
+   **/
+  virtual void setMeasureRttEnabled(bool /* enabled */) {
+    // enabling this feature is delegated to subclasses
+  }
+
+  bool getMeasureRttEnabled() const {
+    return shouldMeasureRtt_;
+  }
+
+  struct MeasuredRTT {
+    explicit MeasuredRTT(std::chrono::milliseconds rtt) {
+      srtt = rtt;
+      minrtt = rtt;
+      last = rtt;
+    }
+
+    std::chrono::milliseconds srtt;
+    std::chrono::milliseconds minrtt;
+    std::chrono::milliseconds last;
+  };
+
+  folly::Optional<MeasuredRTT> getMeasuredRtt() const {
+    return measuredRtt_;
   }
 
   /**
@@ -366,6 +395,9 @@ class HTTPSessionBase : public wangle::ManagedConnection {
     return transportInfo_;
   }
 
+  virtual void onNetworkSwitch(
+    std::unique_ptr<folly::AsyncUDPSocket>) noexcept {}
+
   /**
    * If the connection is closed by remote end
    */
@@ -483,9 +515,9 @@ class HTTPSessionBase : public wangle::ManagedConnection {
 
   virtual void pauseTransactions() = 0;
 
-  void resumeTransactions();
+  virtual void resumeTransactions();
 
-  void setNewTransactionPauseState(HTTPTransaction* txn);
+  virtual void setNewTransactionPauseState(HTTPTransaction* txn) = 0;
 
   /**
    * Install a direct response handler for the transaction based on the
@@ -556,6 +588,8 @@ class HTTPSessionBase : public wangle::ManagedConnection {
    */
   void initCodecHeaderIndexingStrategy();
 
+  void updateRtt(std::chrono::milliseconds rttSample);
+
   /**
    * Attaches Session to RevproxyController instance if it's set
    */
@@ -563,7 +597,7 @@ class HTTPSessionBase : public wangle::ManagedConnection {
 
   HTTPSessionStats* sessionStats_{nullptr};
 
-  InfoCallback* infoCallback_{nullptr}; // maybe can move to protected
+  InfoCallback* infoCallback_{nullptr};
 
   wangle::TransportInfo transportInfo_;
 
@@ -599,6 +633,17 @@ class HTTPSessionBase : public wangle::ManagedConnection {
   /** Address of the remote end of the connection */
   folly::SocketAddress peerAddr_;
 
+  /**
+   * Measured RTT, equal to folly::none if estimation is turned off, or
+   * if no samples have been collected yet
+   */
+  folly::Optional<MeasuredRTT> measuredRtt_;
+
+  /**
+   * Indicates whether to estimate the RTT at the session layer
+   **/
+  bool shouldMeasureRtt_{false};
+
  private:
   // Underlying controller_ is marked as private so that callers must utilize
   // getController/setController protected methods.  This ensures we have a
@@ -612,14 +657,6 @@ class HTTPSessionBase : public wangle::ManagedConnection {
     } else {
       return std::chrono::milliseconds(0);
     }
-  }
-
-  /**
-   * Returns true iff egress should stop on this session.
-   */
-  bool egressLimitExceeded() const {
-    // Changed to >
-    return pendingWriteSize_ > writeBufLimit_;
   }
 
   /**
@@ -681,8 +718,6 @@ class HTTPSessionBase : public wangle::ManagedConnection {
 
   bool prioritySample_ : 1;
   bool h2PrioritiesEnabled_ : 1;
-  bool inResume_ : 1;
-  bool pendingPause_ : 1;
 
   /**
    * Indicates whether Ex Headers is supported in HTTPSession

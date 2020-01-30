@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <folly/portability/GTest.h>
 #include <proxygen/lib/http/codec/compress/HPACKHeader.h>
 
@@ -17,7 +16,6 @@
 
 using namespace proxygen;
 using namespace std;
-using namespace testing;
 
 class HPACKHeaderTests : public testing::Test {
 };
@@ -59,13 +57,13 @@ TEST_F(HPACKHeaderTests, HasValue) {
 TEST_F(HPACKHeaderTests, HeaderIndexingStrategyBasic) {
   HeaderIndexingStrategy indexingStrat;
   HPACKHeader path(":path", "index.php?q=42");
-  EXPECT_FALSE(indexingStrat.indexHeader(path));
+  EXPECT_FALSE(indexingStrat.indexHeader(path.name, path.value));
   HPACKHeader cdn(":path", "/hprofile-ak-prn1/49496_6024432_1026115112_n.jpg");
-  EXPECT_FALSE(indexingStrat.indexHeader(cdn));
+  EXPECT_FALSE(indexingStrat.indexHeader(cdn.name, cdn.value));
   HPACKHeader clen("content-length", "512");
-  EXPECT_FALSE(indexingStrat.indexHeader(clen));
+  EXPECT_FALSE(indexingStrat.indexHeader(clen.name, clen.value));
   HPACKHeader data("data", "value");
-  EXPECT_TRUE(indexingStrat.indexHeader(data));
+  EXPECT_TRUE(indexingStrat.indexHeader(data.name, data.value));
 }
 
 class HPACKHeaderNameTest : public testing::Test {
@@ -177,10 +175,10 @@ TEST_F(HPACKHeaderNameTest, TestOperators) {
 }
 
 TEST_F(HPACKHeaderNameTest, TestIsCommonHeader) {
-  for (uint64_t j = 0; j < HTTPCommonHeaders::num_header_codes; ++j) {
+  for (uint64_t j = 0; j < HTTPCommonHeaders::num_codes; ++j) {
     HTTPHeaderCode code = static_cast<HTTPHeaderCode>(j);
     HPACKHeader testHPACKHeader(
-      *HTTPCommonHeaders::getPointerToHeaderName(code), "");
+      *HTTPCommonHeaders::getPointerToName(code), "");
 
     bool checkResult = j >= HTTPHeaderCodeCommonOffset;
     EXPECT_EQ(testHPACKHeader.name.isCommonHeader(), checkResult);

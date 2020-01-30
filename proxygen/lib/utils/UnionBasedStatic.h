@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 // This pattern is used to create a static whose destructor will never be
@@ -40,16 +39,22 @@ DECLARE_UNION_STATIC_UNION_IMPL(type, name) const var;
 #define DEFINE_UNION_STATIC_UNION_CONST_ARRAY_IMPL(type, size, name, var)     \
 DECLARE_UNION_STATIC_UNION_ARRAY_IMPL(type, size, name) const var;
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#define ATTRIBUTE_CONSTRUCTOR
+#else
+#define ATTRIBUTE_CONSTRUCTOR __attribute__((__constructor__))
+#endif
+
 // The const_casts are only needed if creating a const union but it's a
 // no-op otherwise so keep it to avoid creating even more macro helpers.
 #define DEFINE_UNION_STATIC_CONSTRUCTOR_IMPL(type, name, var)                 \
-__attribute__((__constructor__))                                              \
+ATTRIBUTE_CONSTRUCTOR                                                         \
 void init##name##Union() {                                                    \
   new (const_cast<type*>(&var.data)) type();                                  \
 }
 
 #define DEFINE_UNION_STATIC_CONSTRUCTOR_ARG_IMPL(type, name, var, ...)        \
-__attribute__((__constructor__))                                              \
+ATTRIBUTE_CONSTRUCTOR                                                         \
 void init##name##Union() {                                                    \
   new (const_cast<type*>(&var.data)) type(__VA_ARGS__);                       \
 }

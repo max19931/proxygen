@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <proxygen/lib/http/codec/HTTPCodec.h>
@@ -78,9 +77,9 @@ class PassThroughHTTPCodecFilter: public HTTPCodecFilter {
                 ErrorCode code,
                 std::unique_ptr<folly::IOBuf> debugData = nullptr) override;
 
-  void onPingRequest(uint64_t uniqueID) override;
+  void onPingRequest(uint64_t data) override;
 
-  void onPingReply(uint64_t uniqueID) override;
+  void onPingReply(uint64_t data) override;
 
   void onWindowUpdate(StreamID stream, uint32_t amount) override;
 
@@ -200,10 +199,11 @@ class PassThroughHTTPCodecFilter: public HTTPCodecFilter {
     ErrorCode statusCode,
     std::unique_ptr<folly::IOBuf> debugData = nullptr) override;
 
-  size_t generatePingRequest(folly::IOBufQueue& writeBuf) override;
+  size_t generatePingRequest(folly::IOBufQueue& writeBuf,
+                         folly::Optional<uint64_t> data = folly::none) override;
 
   size_t generatePingReply(folly::IOBufQueue& writeBuf,
-                           uint64_t uniqueID) override;
+                           uint64_t data) override;
 
   size_t generateSettings(folly::IOBufQueue& writeBuf) override;
 

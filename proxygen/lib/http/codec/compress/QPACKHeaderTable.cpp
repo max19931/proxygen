@@ -1,19 +1,15 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/compress/QPACKHeaderTable.h>
 
 #include <glog/logging.h>
 
-using std::list;
-using std::pair;
-using std::string;
 
 namespace {
 // For tables 0..384     minFree = 48
@@ -60,7 +56,6 @@ bool QPACKHeaderTable::add(HPACKHeader header) {
   if (refCount_) {
     (*refCount_)[head_] = 0;
   }
-  ++insertCount_;
   DCHECK_EQ(internalToAbsolute(head_), insertCount_);
   // Increase minUsable_ until the free space + drainedBytes is >= minFree.
   // For HPACK, minFree is 0 and this is a no-op.
@@ -203,8 +198,8 @@ bool QPACKHeaderTable::canEvict(uint32_t needed) {
     i = next(i);
   }
   if (freeable < needed) {
-    VLOG(5) << "header=" << table_[i].name << " blocked eviction, recount="
-            << (*refCount_)[i];
+    VLOG(5) << "header=" << table_[i].name << ":" << table_[i].value
+            << " blocked eviction, recount=" << (*refCount_)[i];
     return false;
   }
   return true;

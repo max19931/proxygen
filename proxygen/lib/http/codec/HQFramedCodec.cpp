@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2019-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/HQFramedCodec.h>
 
 #include <proxygen/lib/http/codec/HQFramer.h>
@@ -20,7 +19,6 @@
 
 namespace proxygen { namespace hq {
 
-using namespace proxygen::compress;
 using namespace folly::io;
 using namespace folly;
 
@@ -30,8 +28,6 @@ ParseResult HQFramedCodec::parseFrame(Cursor& cursor) {
       return parseData(cursor, curHeader_);
     case hq::FrameType::HEADERS:
       return parseHeaders(cursor, curHeader_);
-    case hq::FrameType::PRIORITY:
-      return parsePriority(cursor, curHeader_);
     case hq::FrameType::CANCEL_PUSH:
       return parseCancelPush(cursor, curHeader_);
     case hq::FrameType::SETTINGS:

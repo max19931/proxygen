@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <proxygen/lib/http/HTTPMessage.h>
@@ -78,18 +77,19 @@ class HTTPRequestVerifier {
     return true;
   }
 
-  bool setAuthority(folly::StringPiece authority) {
+  bool setAuthority(folly::StringPiece authority, bool validate=true) {
     if (hasAuthority_) {
       error = "Duplicate authority";
       return false;
     }
-    if (!CodecUtil::validateHeaderValue(authority, CodecUtil::STRICT)) {
+    if (validate &&
+        !CodecUtil::validateHeaderValue(authority, CodecUtil::STRICT)) {
       error = "Invalid authority";
       return false;
     }
     hasAuthority_ = true;
     assert(msg_ != nullptr);
-    msg_->getHeaders().add(HTTP_HEADER_HOST, authority.str());
+    msg_->getHeaders().add(HTTP_HEADER_HOST, authority);
     return true;
   }
 

@@ -1,4 +1,11 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 cmake_minimum_required(VERSION 3.10)
+include(CheckCXXCompilerFlag)
 
 project(
     proxygen
@@ -11,6 +18,9 @@ set(CMAKE_MODULE_PATH
   # For shipit-transformed builds
   "${CMAKE_CURRENT_SOURCE_DIR}/build/fbcode_builder/CMake"
   ${CMAKE_MODULE_PATH})
+
+include(FBBuildOptions)
+fb_activate_static_library_option()
 
 # PROXYGEN_FBCODE_ROOT is where the top level proxygen/ directory resides, so
 # an #include <proxygen/path/to/file> will resolve to
@@ -25,16 +35,17 @@ file(MAKE_DIRECTORY ${PROXYGEN_GENERATED_ROOT})
 
 # Build-time program requirements.
 find_program(PROXYGEN_PYTHON python)
-if(PROXYGEN_PYTHON-NOTFOUND)
+if(NOT PROXYGEN_PYTHON)
     message(FATAL_ERROR "python is required for the proxygen build")
 endif()
 
 find_program(PROXYGEN_GPERF gperf)
-if(PROXYGEN_GPERF-NOTFOUND)
+if(NOT PROXYGEN_GPERF)
     message(FATAL_ERROR "gperf is required for the proxygen build")
 endif()
 
 # Dependencies
+find_package(fmt REQUIRED)
 find_package(folly REQUIRED)
 find_package(wangle REQUIRED)
 find_package(Fizz REQUIRED)
@@ -47,7 +58,6 @@ find_package(Boost 1.58 REQUIRED
   COMPONENTS
     iostreams
     context
-    chrono
     date_time
     filesystem
     program_options
@@ -62,6 +72,31 @@ list(APPEND
     -Wall
     -Wextra
 )
+
+CHECK_CXX_COMPILER_FLAG(-Wnoexcept-type COMPILER_HAS_W_NOEXCEPT_TYPE)
+if (COMPILER_HAS_W_NOEXCEPT_TYPE)
+  list(APPEND _PROXYGEN_COMMON_COMPILE_OPTIONS -Wno-noexcept-type)
+endif()
+CHECK_CXX_COMPILER_FLAG(-Wunused-parameter COMPILER_HAS_W_UNUSED_PARAMETER)
+if (COMPILER_HAS_W_UNUSED_PARAMETER)
+  list(APPEND _PROXYGEN_COMMON_COMPILE_OPTIONS -Wno-unused-parameter)
+endif()
+CHECK_CXX_COMPILER_FLAG(-Wmissing-field-initializers COMPILER_HAS_W_MISSING_FIELD_INITIALIZERS)
+if (COMPILER_HAS_W_MISSING_FIELD_INITIALIZERS)
+  list(APPEND _PROXYGEN_COMMON_COMPILE_OPTIONS -Wno-missing-field-initializers)
+endif()
+CHECK_CXX_COMPILER_FLAG(-Wnullability-completeness COMPILER_HAS_W_NULLABILITY_COMPLETENESS)
+if (COMPILER_HAS_W_NULLABILITY_COMPLETENESS)
+    list(APPEND _PROXYGEN_COMMON_COMPILE_OPTIONS -Wno-nullability-completeness)
+endif()
+CHECK_CXX_COMPILER_FLAG(-Wdeprecated-register COMPILER_HAS_W_DEPRECATED_REGISTER)
+if (COMPILER_HAS_W_DEPRECATED_REGISTER)
+    list(APPEND _PROXYGEN_COMMON_COMPILE_OPTIONS -Wno-deprecated-register)
+endif()
+CHECK_CXX_COMPILER_FLAG(-Wunused-value COMPILER_HAS_W_UNUSED_VALUE)
+if (COMPILER_HAS_W_UNUSED_VALUE)
+    list(APPEND _PROXYGEN_COMMON_COMPILE_OPTIONS -Wno-unused-value)
+endif()
 
 SET(GFLAG_DEPENDENCIES "")
 SET(PROXYGEN_EXTRA_LINK_LIBRARIES "")

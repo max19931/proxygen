@@ -1,12 +1,12 @@
 /*
- *  Copyright (c) 2019-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
+#pragma once
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
@@ -17,14 +17,16 @@
 #include <regex>
 #include <string>
 
+#include <proxygen/httpserver/samples/hq/HQParams.h>
+
 namespace proxygen {
 
 struct ConnIdLogSink : google::LogSink {
   using FileEntry =
       std::pair<folly::File, std::chrono::system_clock::time_point>;
 
-  ConnIdLogSink(const std::string& logDir, const std::string& prefix)
-      : logDir_(logDir), prefix_(prefix) {
+  ConnIdLogSink(const quic::samples::HQParams& params)
+      : logDir_(params.logdir), prefix_(params.logprefix) {
   }
 
   void send(google::LogSeverity severity,
@@ -71,8 +73,8 @@ struct ConnIdLogSink : google::LogSink {
                                         line,
                                         ' ',
                                         testMsg);
-      ::write(fd, msg.c_str(), msg.size());
-      ::write(fd, "<br/>", 5);
+      FOLLY_MAYBE_UNUSED auto writeRes = ::write(fd, msg.c_str(), msg.size());
+      writeRes = ::write(fd, "<br/>", 5);
     } // else, not for a specific CID
   }
 

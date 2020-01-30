@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/httpserver/HTTPServer.h>
 #include <boost/thread.hpp>
 #include <folly/FileUtil.h>
@@ -26,10 +25,8 @@
 using namespace folly;
 using namespace folly::ssl;
 using namespace proxygen;
-using namespace testing;
 using namespace CurlService;
 
-using folly::AsyncSSLSocket;
 using folly::AsyncServerSocket;
 using folly::EventBaseManager;
 using folly::SSLContext;
@@ -48,8 +45,8 @@ class ServerThread {
   HTTPServer* server_{nullptr};
 
  public:
-
-  explicit ServerThread(HTTPServer* server) : server_(server) {}
+  explicit ServerThread(HTTPServer* server) : server_(server) {
+  }
   ~ServerThread() {
     if (server_) {
       server_->stop();
@@ -69,6 +66,57 @@ class ServerThread {
     });
     barrier_.wait();
     return !throws;
+  }
+};
+
+/**
+ * Similar to ServerThread except it waits on a folly::Baton before exit the
+ * thread.
+ *
+ * The reason you need this is that when start() is run on one thread, the main
+ * EVB inside a HTTPServer is owned by a threadlocal which dies when thread
+ * exits, which is a time point you don't control. So if you have code that
+ * requires the EVB doesn't die (for example, the TestRepeatStopCalls test
+ * case), you'd want to delay the thread exit point until you are done with your
+ * stop() calls.
+ *
+ * A better solution would be to change the EVB ownership inside HTTPServer.
+ */
+class WaitableServerThread {
+ private:
+  boost::barrier barrier_{2};
+  std::thread t_;
+  HTTPServer* server_{nullptr};
+  folly::Baton<true, std::atomic> baton_;
+
+ public:
+  explicit WaitableServerThread(HTTPServer* server) : server_(server) {
+  }
+
+  ~WaitableServerThread() {
+    if (server_) {
+      server_->stop();
+    }
+    t_.join();
+  }
+
+  bool start() {
+    bool throws = false;
+    t_ = std::thread([&]() {
+      server_->start([&]() { barrier_.wait(); },
+                     [&](std::exception_ptr /*ex*/) {
+                       throws = true;
+                       server_ = nullptr;
+                       barrier_.wait();
+                     });
+      baton_.wait();
+    });
+    barrier_.wait();
+    return !throws;
+  }
+
+  void exitThread() {
+    baton_.post();
   }
 };
 
@@ -103,7 +151,7 @@ TEST(MultiBind, HandlesListenFailures) {
   // to listen on a FD that another socket is listening on fails.
   try {
     socket->listen(1024);
-  } catch (const std::exception& ex) {
+  } catch (const std::exception&) {
     return;
   }
 
@@ -114,12 +162,14 @@ TEST(MultiBind, HandlesListenFailures) {
 TEST(HttpServerStartStop, TestRepeatStopCalls) {
   HTTPServerOptions options;
   auto server = std::make_unique<HTTPServer>(std::move(options));
-  auto st = std::make_unique<ServerThread>(server.get());
+  auto st = std::make_unique<WaitableServerThread>(server.get());
   EXPECT_TRUE(st->start());
 
   server->stop();
   // Calling stop again should be benign.
   server->stop();
+  // Let the WaitableServerThread exit
+  st->exitThread();
 }
 
 // Make an SSL connection to the server
@@ -565,7 +615,7 @@ TEST(UseExistingSocket, TestWithMultipleSocketFds) {
   serverSocket->bind(0);
   try {
     serverSocket->bind(1024);
-  } catch (const std::exception& ex) {
+  } catch (const std::exception&) {
     // This is fine because we are trying to bind to multiple ports
   }
 

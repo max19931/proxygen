@@ -1,19 +1,15 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/compress/HeaderTable.h>
 
 #include <glog/logging.h>
 
-using std::list;
-using std::pair;
-using std::string;
 
 namespace proxygen {
 
@@ -57,6 +53,7 @@ bool HeaderTable::add(HPACKHeader header) {
   table_[head_] = std::move(header);
 
   ++size_;
+  ++insertCount_;
   return true;
 }
 
@@ -64,8 +61,13 @@ uint32_t HeaderTable::getIndex(const HPACKHeader& header) const {
   return getIndexImpl(header.name, header.value, false);
 }
 
+uint32_t HeaderTable::getIndex(const HPACKHeaderName& name,
+                               folly::StringPiece value) const {
+  return getIndexImpl(name, value, false);
+}
+
 uint32_t HeaderTable::getIndexImpl(const HPACKHeaderName& headerName,
-                                   const folly::fbstring& value,
+                                   folly::StringPiece value,
                                    bool nameOnly) const {
   auto it = names_.find(headerName);
   if (it == names_.end()) {
@@ -86,7 +88,7 @@ bool HeaderTable::hasName(const HPACKHeaderName& headerName) {
 }
 
 uint32_t HeaderTable::nameIndex(const HPACKHeaderName& headerName) const {
-  folly::fbstring value;
+  folly::StringPiece value;
   return getIndexImpl(headerName, value, true /* name only */);
 }
 

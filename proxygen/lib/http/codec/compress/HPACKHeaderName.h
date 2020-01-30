@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <algorithm>
@@ -17,6 +16,7 @@
 #include <boost/variant.hpp>
 #include <proxygen/lib/http/HTTPCommonHeaders.h>
 #include <folly/Range.h>
+#include <glog/logging.h>
 
 namespace proxygen {
 
@@ -32,6 +32,12 @@ class HPACKHeaderName {
 
   explicit HPACKHeaderName(folly::StringPiece name) {
     storeAddress(name);
+  }
+  explicit HPACKHeaderName(HTTPHeaderCode headerCode) {
+    CHECK_NE(headerCode, HTTP_HEADER_NONE);
+    CHECK_NE(headerCode, HTTP_HEADER_OTHER);
+    address_ = HTTPCommonHeaders::getPointerToName(
+      headerCode, HTTPCommonHeaderTableType::TABLE_LOWERCASE);
   }
   HPACKHeaderName(const HPACKHeaderName& headerName) {
     copyAddress(headerName);
@@ -112,15 +118,16 @@ class HPACKHeaderName {
    * Returns the HTTPHeaderCode associated with the wrapped address_
    */
   HTTPHeaderCode getHeaderCode() const {
-    return HTTPCommonHeaders::getHeaderCodeFromTableCommonHeaderName(
-      address_, TABLE_LOWERCASE);
+    return HTTPCommonHeaders::getCodeFromTableName(
+      address_, HTTPCommonHeaderTableType::TABLE_LOWERCASE);
   }
 
   /*
    * Returns whether the name pointed to by this instance is a common header
    */
   bool isCommonHeader() const {
-    return HTTPCommonHeaders::isHeaderNameFromTable(address_, TABLE_LOWERCASE);
+    return HTTPCommonHeaders::isNameFromTable(
+      address_, HTTPCommonHeaderTableType::TABLE_LOWERCASE);
   }
 
   /*
@@ -146,8 +153,8 @@ class HPACKHeaderName {
       std::transform(name.begin(), name.end(), newAddress->begin(), ::tolower);
       address_ = newAddress;
     } else {
-      address_ = HTTPCommonHeaders::getPointerToHeaderName(
-        headerCode, TABLE_LOWERCASE);
+      address_ = HTTPCommonHeaders::getPointerToName(
+        headerCode, HTTPCommonHeaderTableType::TABLE_LOWERCASE);
     }
   }
 
@@ -188,8 +195,8 @@ class HPACKHeaderName {
     if (address_ == nullptr) {
       return false;
     } else {
-      return !HTTPCommonHeaders::isHeaderNameFromTable(
-        address_, TABLE_LOWERCASE);
+      return !HTTPCommonHeaders::isNameFromTable(
+        address_, HTTPCommonHeaderTableType::TABLE_LOWERCASE);
     }
   }
 

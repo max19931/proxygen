@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/session/HTTPSession.h>
 
 #include <chrono>
@@ -28,17 +27,10 @@
 using fizz::AsyncFizzBase;
 using folly::AsyncSocket;
 using folly::AsyncSocketException;
-using folly::AsyncSSLSocket;
-using folly::AsyncTransport;
 using folly::AsyncTransportWrapper;
 using folly::IOBuf;
-using folly::IOBufQueue;
 using folly::SocketAddress;
-using folly::WriteFlags;
-using folly::io::QueueAppender;
-using std::make_unique;
 using std::pair;
-using std::set;
 using std::string;
 using std::unique_ptr;
 using std::vector;
@@ -152,7 +144,10 @@ HTTPSession::HTTPSession(const WheelTimerInstance& timeout,
       writes_(SocketState::UNPAUSED),
       ingressUpgraded_(false),
       resetSocketOnShutdown_(false),
-      inLoopCallback_(false) {
+      inLoopCallback_(false),
+      inResume_(false),
+      pendingPause_(false),
+      writeBufSplit_(false) {
   byteEventTracker_ = std::make_shared<ByteEventTracker>(this);
   initialReceiveWindow_ = receiveStreamWindowSize_ = receiveSessionWindowSize_ =
       codec_->getDefaultWindowSize();
@@ -177,6 +172,8 @@ HTTPSession::HTTPSession(const WheelTimerInstance& timeout,
   if (!sock_->isReplaySafe()) {
     sock_->setReplaySafetyCallback(this);
   }
+
+  rateLimitingCounters_ = std::make_shared<RateLimitingCounters>();
 }
 
 uint32_t HTTPSession::getCertAuthSettingVal() {
@@ -621,31 +618,50 @@ void HTTPSession::readErr(const AsyncSocketException& ex) noexcept {
 
 HTTPTransaction* HTTPSession::newPushedTransaction(
     HTTPCodec::StreamID assocStreamId,
-    HTTPTransaction::PushHandler* handler) noexcept {
+    HTTPTransaction::PushHandler* handler,
+    ProxygenError* error) noexcept {
   if (!codec_->supportsPushTransactions()) {
+    SET_PROXYGEN_ERROR_IF(error, ProxygenError::kErrorPushNotSupported);
     return nullptr;
   }
   CHECK(isDownstream());
   CHECK_NOTNULL(handler);
-  if (draining_ || (outgoingStreams_ >= maxConcurrentOutgoingStreamsRemote_)) {
+  if (draining_) {
+    // This session doesn't support any more push transactions
+    SET_PROXYGEN_ERROR_IF(error, ProxygenError::kErrorTransportIsDraining);
+    return nullptr;
+  }
+
+  if (outgoingStreams_ >= maxConcurrentOutgoingStreamsRemote_) {
     // This session doesn't support any more push transactions
     // This could be an actual problem - since a single downstream SPDY session
     // might be connected to N upstream hosts, each of which send M pushes,
     // which exceeds the limit.
     // should we queue?
+    SET_PROXYGEN_ERROR_IF(error,
+      ProxygenError::kErrorMaxConcurrentOutgoingStreamLimitReached);
     return nullptr;
   }
 
   HTTPTransaction* txn = createTransaction(
-      codec_->createStream(), assocStreamId, HTTPCodec::NoExAttributes);
+      codec_->createStream(), assocStreamId, HTTPCodec::NoExAttributes, http2::DefaultPriority, error);
   if (!txn) {
     return nullptr;
   }
-
   DestructorGuard dg(this);
   txn->setHandler(handler);
   setNewTransactionPauseState(txn);
   return txn;
+}
+
+void HTTPSession::setNewTransactionPauseState(HTTPTransaction* txn) {
+  if (!writesPaused()) {
+    return;
+  }
+  CHECK(txn);
+  // If writes are paused, start this txn off in the egress paused state
+  VLOG(4) << *this << " starting streamID=" << txn->getID() << " egress paused";
+  txn->pauseEgress();
 }
 
 HTTPTransaction* FOLLY_NULLABLE
@@ -755,11 +771,15 @@ void HTTPSession::onMessageBegin(HTTPCodec::StreamID streamID,
     // There must be at least two transactions (we just checked). The previous
     // txns haven't completed yet. Pause reads until they complete
     DCHECK_GE(transactions_.size(), 2);
-    for (auto it = ++transactions_.rbegin(); it != transactions_.rend(); ++it) {
-      DCHECK(it->second.isIngressEOMSeen());
-      it->second.pauseIngress();
+    std::map<HTTPCodec::StreamID, HTTPTransaction*> sortedTxns;
+    for (auto& txn: transactions_) {
+      sortedTxns.emplace(txn.first, &txn.second);
     }
-    transactions_.rbegin()->second.pauseIngress();
+    for (auto it = ++sortedTxns.rbegin(); it != sortedTxns.rend(); ++it) {
+      DCHECK(it->second->isIngressEOMSeen());
+      it->second->pauseIngress();
+    }
+    sortedTxns.rbegin()->second->pauseIngress();
     DCHECK_EQ(liveTransactions_, 0);
     DCHECK(readsPaused());
   }
@@ -870,6 +890,8 @@ void HTTPSession::onHeadersComplete(HTTPCodec::StreamID streamID,
     return;
   }
 
+  HTTPTransaction::DestructorGuard dg(txn);
+
   const char* sslCipher =
       transportInfo_.sslCipher ? transportInfo_.sslCipher->c_str() : nullptr;
   msg->setSecureInfo(transportInfo_.sslVersion, sslCipher);
@@ -904,9 +926,8 @@ void HTTPSession::onHeadersComplete(HTTPCodec::StreamID streamID,
   }
 
   // The txn may have already been aborted by the handler.
-  // Verify that the txn still exists before ingress callbacks.
-  txn = findTransaction(streamID);
-  if (!txn) {
+  // Verify that the txn is not done.
+  if (txn->isIngressComplete() && txn->isEgressComplete()) {
     return;
   }
 
@@ -1085,7 +1106,12 @@ void HTTPSession::onError(HTTPCodec::StreamID streamID,
         infoCallback_->onRequestBegin(*this);
       }
       if (txn) {
-        handleErrorDirectly(txn, error);
+        if (incrementDirectErrorHandlingInCurInterval()) {
+          // The rate limit has been exceeded
+          return;
+        } else {
+          handleErrorDirectly(txn, error);
+        }
       }
     } else if (newTxn) {
       onNewTransactionParseError(streamID, error);
@@ -1098,7 +1124,12 @@ void HTTPSession::onError(HTTPCodec::StreamID streamID,
 
   if (!txn->getHandler() &&
       txn->getEgressState() == HTTPTransactionEgressSM::State::Start) {
-    handleErrorDirectly(txn, error);
+    if (incrementDirectErrorHandlingInCurInterval()) {
+      // The rate limit has been exceeded
+      return;
+    } else {
+      handleErrorDirectly(txn, error);
+    }
     return;
   }
 
@@ -1113,6 +1144,11 @@ void HTTPSession::onError(HTTPCodec::StreamID streamID,
 void HTTPSession::onAbort(HTTPCodec::StreamID streamID, ErrorCode code) {
   VLOG(4) << "stream abort on " << *this << ", streamID=" << streamID
           << ", code=" << getErrorCodeString(code);
+
+  if (incrementNumControlMsgsInCurInterval(http2::FrameType::RST_STREAM)) {
+    return;
+  }
+
   HTTPTransaction* txn = findTransaction(streamID);
   if (!txn) {
     VLOG(4) << *this
@@ -1161,12 +1197,14 @@ void HTTPSession::onGoaway(uint64_t lastGoodStreamID,
   // We give the less-forceful onGoaway() first so that transactions have
   // a chance to do stat tracking before potentially getting a forceful
   // onError().
-  invokeOnAllTransactions(&HTTPTransaction::onGoaway, code);
+  invokeOnAllTransactions([code] (HTTPTransaction* txn) {
+      txn->onGoaway(code);
+    });
 
   // Abort transactions which have been initiated but not created
   // successfully at the remote end. Upstream transactions are created
   // with odd transaction IDs and downstream transactions with even IDs.
-  vector<HTTPCodec::StreamID> ids;
+  std::vector<HTTPCodec::StreamID> ids;
   auto firstStream = HTTPCodec::NoStream;
 
   for (const auto& txn : transactions_) {
@@ -1209,27 +1247,63 @@ void HTTPSession::onGoaway(uint64_t lastGoodStreamID,
   errorOnTransactionIds(ids, kErrorStreamUnacknowledged);
 }
 
-void HTTPSession::onPingRequest(uint64_t uniqueID) {
-  VLOG(4) << *this << " got ping request with id=" << uniqueID;
+void HTTPSession::onPingRequest(uint64_t data) {
+  VLOG(4) << *this << " got ping request with data=" << data;
+
+  if (incrementNumControlMsgsInCurInterval(http2::FrameType::PING)) {
+    return;
+  }
 
   TimePoint timestamp = getCurrentTime();
 
-  // Insert the ping reply to the head of writeBuf_
-  folly::IOBufQueue pingBuf(folly::IOBufQueue::cacheChainLength());
-  codec_->generatePingReply(pingBuf, uniqueID);
-  size_t pingSize = pingBuf.chainLength();
-  pingBuf.append(writeBuf_.move());
-  writeBuf_.append(pingBuf.move());
+  uint64_t bytesScheduledBeforePing = 0;
+  size_t pingSize = 0;
+  if (writeBufSplit_) {
+    // Stick the ping at the end, we don't know that writeBuf_ begins on a
+    // frame boundary anymore
+    bytesScheduledBeforePing = sessionByteOffset();
+    pingSize = codec_->generatePingReply(writeBuf_, data);
+  } else {
+    // Insert the ping reply to the head of writeBuf_
+    folly::IOBufQueue pingBuf(folly::IOBufQueue::cacheChainLength());
+    pingSize = codec_->generatePingReply(pingBuf, data);
+    pingBuf.append(writeBuf_.move());
+    writeBuf_.append(pingBuf.move());
+    bytesScheduledBeforePing = bytesScheduled_;
+  }
 
   if (byteEventTracker_) {
-    byteEventTracker_->addPingByteEvent(pingSize, timestamp, bytesScheduled_);
+    // addPingByteEvent has logic to shift all ByteEvents after
+    // 'bytesScheduledBeforePing'.  In the case where we're putting it at the
+    // end, there will be no events with an offset as high - so it will be a
+    // no-op.
+    byteEventTracker_->addPingByteEvent(pingSize, timestamp,
+                                        bytesScheduledBeforePing);
   }
 
   scheduleWrite();
 }
 
-void HTTPSession::onPingReply(uint64_t uniqueID) {
-  VLOG(4) << *this << " got ping reply with id=" << uniqueID;
+void HTTPSession::onPingReply(uint64_t data) {
+  VLOG(4) << *this << " got ping reply with data=" << data;
+
+  if (getMeasureRttEnabled()) {
+    std::chrono::milliseconds pingTime(data);
+
+    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch());
+    auto pingDuration = now - pingTime;
+    if (pingDuration < std::chrono::milliseconds(0)) {
+      VLOG(4) << *this
+              << " discarding RTT sample. PING timestamp is in the future";
+    } else if (pingDuration > timeout_.getDefaultTimeout()) {
+      VLOG(4) << *this
+              << " discarding RTT sample. Sample too large.";
+    } else {
+      updateRtt(pingDuration);
+    }
+  }
+
   if (infoCallback_) {
     infoCallback_->onPingReplyReceived();
   }
@@ -1254,6 +1328,9 @@ void HTTPSession::onWindowUpdate(HTTPCodec::StreamID streamID,
 
 void HTTPSession::onSettings(const SettingsList& settings) {
   DestructorGuard g(this);
+  if (incrementNumControlMsgsInCurInterval(http2::FrameType::SETTINGS)) {
+    return;
+  }
   for (auto& setting : settings) {
     if (setting.id == SettingsId::INITIAL_WINDOW_SIZE) {
       onSetSendWindow(setting.value);
@@ -1282,7 +1359,8 @@ void HTTPSession::onSettingsAck() {
 
 void HTTPSession::onPriority(HTTPCodec::StreamID streamID,
                              const HTTPMessage::HTTPPriority& pri) {
-  if (!getHTTP2PrioritiesEnabled()) {
+  if (!getHTTP2PrioritiesEnabled() ||
+      incrementNumControlMsgsInCurInterval(http2::FrameType::PRIORITY)) {
     return;
   }
   http2::PriorityUpdate h2Pri{
@@ -1435,7 +1513,9 @@ bool HTTPSession::onNativeProtocolUpgradeImpl(
 
 void HTTPSession::onSetSendWindow(uint32_t windowSize) {
   VLOG(4) << *this << " got send window size adjustment. new=" << windowSize;
-  invokeOnAllTransactions(&HTTPTransaction::onIngressSetSendWindow, windowSize);
+  invokeOnAllTransactions([windowSize] (HTTPTransaction* txn) {
+      txn->onIngressSetSendWindow(windowSize);
+    });
 }
 
 void HTTPSession::onSetMaxInitiatedStreams(uint32_t maxTxns) {
@@ -1488,7 +1568,10 @@ void HTTPSession::resumeIngress(HTTPTransaction* txn) noexcept {
     }
   }
 
-  if (liveTransactions_ == 1) {
+  // This function can be called from detach(), in which case liveTransactions_
+  // may go to 1 briefly, even though we are still anit-pipelining.
+  if (liveTransactions_ == 1 &&
+      (codec_->supportsParallelRequests() || getPipelineStreamCount() <= 1)) {
     resumeReads();
   }
 }
@@ -1550,7 +1633,11 @@ void HTTPSession::sendHeaders(HTTPTransaction* txn,
     // upstream picks priority
     if (getHTTP2PrioritiesEnabled()) {
       auto pri = getMessagePriority(&headers);
-      txn->onPriorityUpdate(pri);
+      if (pri.streamDependency == txn->getID()) {
+        LOG(ERROR) << "Attempted to create circular dependency txn=" << *this;
+      } else {
+        txn->onPriorityUpdate(pri);
+      }
     }
   }
 
@@ -1572,7 +1659,7 @@ void HTTPSession::sendHeaders(HTTPTransaction* txn,
 
   // for push response count towards the MAX_CONCURRENT_STREAMS limit
   if (isDownstream() && headers.isResponse() && txn->isPushed()) {
-    incrementOutgoingStreams();
+    incrementOutgoingStreams(txn);
   }
 
   // For all upstream headers, addFirstHeaderByteEvent should be added
@@ -1800,11 +1887,13 @@ void HTTPSession::decrementTransactionCount(HTTPTransaction* txn,
                                             bool egressEOM) {
   if ((isUpstream() && !txn->isPushed()) ||
       (isDownstream() && txn->isPushed())) {
-    if (ingressEOM && txn->testAndClearActive()) {
+    if (ingressEOM && txn->testAndClearIsCountedTowardsStreamLimit()) {
+      DCHECK_NE(outgoingStreams_, 0);
       outgoingStreams_--;
     }
   } else {
-    if (egressEOM && txn->testAndClearActive()) {
+    if (egressEOM && txn->testAndClearIsCountedTowardsStreamLimit()) {
+      DCHECK_NE(incomingStreams_, 0);
       incomingStreams_--;
     }
   }
@@ -1817,15 +1906,21 @@ void HTTPSession::decrementTransactionCount(HTTPTransaction* txn,
 // and there is still a pipelinable stream, then it was pipelining
 bool HTTPSession::maybeResumePausedPipelinedTransaction(size_t oldStreamCount,
                                                         uint32_t txnSeqn) {
-  if (!codec_->supportsParallelRequests() && !transactions_.empty() &&
-      getPipelineStreamCount() < oldStreamCount &&
-      getPipelineStreamCount() == 1) {
-    auto& nextTxn = transactions_.rbegin()->second;
-    DCHECK_EQ(nextTxn.getSequenceNumber(), txnSeqn + 1);
-    DCHECK(!nextTxn.isIngressComplete());
-    DCHECK(nextTxn.isIngressPaused());
-    VLOG(4) << "Resuming paused pipelined txn " << nextTxn;
-    nextTxn.resumeIngress();
+  if (!codec_->supportsParallelRequests() && !transactions_.empty()) {
+    auto pipelineStreamCount = getPipelineStreamCount();
+    if (pipelineStreamCount < oldStreamCount &&
+        pipelineStreamCount == 1) {
+      // For H1, StreamID = txnSeqn + 1
+      auto curStreamId = txnSeqn + 1;
+      auto txnIt = transactions_.find(curStreamId + 1);
+      CHECK(txnIt != transactions_.end());
+      auto& nextTxn = txnIt->second;
+      DCHECK_EQ(nextTxn.getSequenceNumber(), txnSeqn + 1);
+      DCHECK(!nextTxn.isIngressComplete());
+      DCHECK(nextTxn.isIngressPaused());
+      VLOG(4) << "Resuming paused pipelined txn " << nextTxn;
+      nextTxn.resumeIngress();
+    }
     return true;
   }
   return false;
@@ -1865,6 +1960,9 @@ void HTTPSession::detach(HTTPTransaction* txn) noexcept {
 
   auto oldStreamCount = getPipelineStreamCount();
   decrementTransactionCount(txn, true, true);
+  if (lastTxn_ == txn) {
+    lastTxn_ = nullptr;
+  }
   transactions_.erase(it);
 
   if (transactions_.empty()) {
@@ -1945,6 +2043,7 @@ bool HTTPSession::getCurrentTransportInfoWithoutUpdate(
     tinfo->readTcpCongestionControl(sock);
     tinfo->readMaxPacingRate(sock);
 #endif // defined(__linux__) || defined(__FreeBSD__)
+    tinfo->totalBytes = sock->getRawBytesWritten();
     return true;
   }
   return false;
@@ -1974,7 +2073,21 @@ bool HTTPSession::getCurrentTransportInfo(TransportInfo* tinfo) {
   return false;
 }
 
-unique_ptr<IOBuf> HTTPSession::getNextToSend(bool* cork, bool* som, bool* eom) {
+void HTTPSession::getFlowControlInfo(
+    HTTPTransaction::FlowControlInfo* info) {
+  info->flowControlEnabled_ = connFlowControl_ != nullptr;
+  if (connFlowControl_) {
+    info->sessionRecvWindow_ = connFlowControl_->getRecvWindow().getCapacity();
+    info->sessionSendWindow_ = connFlowControl_->getSendWindow().getSize();
+  }
+}
+
+HTTPTransaction::Transport::Type HTTPSession::getSessionType() const noexcept {
+  return getType();
+}
+
+unique_ptr<IOBuf> HTTPSession::getNextToSend(
+    bool* cork, bool* timestampTx, bool* timestampAck) {
   // limit ourselves to one outstanding write at a time (onWriteSuccess calls
   // scheduleWrite)
   if (numActiveWrites_ > 0 || writesShutdown()) {
@@ -2039,10 +2152,11 @@ unique_ptr<IOBuf> HTTPSession::getNextToSend(bool* cork, bool* som, bool* eom) {
       break;
     }
   }
-  *som = false;
-  *eom = false;
+  *timestampTx = false;
+  *timestampAck = false;
   if (byteEventTracker_) {
-    uint64_t needed = byteEventTracker_->preSend(cork, som, eom, bytesWritten_);
+    uint64_t needed = byteEventTracker_->preSend(
+        cork, timestampTx, timestampAck, bytesWritten_);
     if (needed > 0) {
       VLOG(5) << *this
               << " writeBuf_.chainLength(): " << writeBuf_.chainLength()
@@ -2054,12 +2168,9 @@ unique_ptr<IOBuf> HTTPSession::getNextToSend(bool* cork, bool* som, bool* eom) {
                 << writeBuf_.chainLength() << " bytes IOBuf";
         *cork = true;
         if (sessionStats_) {
-          if (*eom) {
-            sessionStats_->recordTTLBAIOBSplitByEom();
-          } else {
-            sessionStats_->recordTTBTXIOBSplitBySom();
-          }
+          sessionStats_->recordPresendIOSplit();
         }
+        writeBufSplit_ = true;
         return writeBuf_.split(needed);
       } else {
         CHECK_EQ(needed, writeBuf_.chainLength());
@@ -2083,6 +2194,11 @@ void HTTPSession::runLoopCallback() noexcept {
     inLoopCallback_ = false;
     // This ScopeGuard needs to be under the above DestructorGuard
     updatePendingWrites();
+    if (!hasMoreWrites()) {
+      invokeOnAllTransactions([] (HTTPTransaction* txn) {
+          txn->checkIfEgressRateLimitedByUpstream();
+        });
+    }
     checkForShutdown();
   });
   VLOG(5) << *this << " in loop callback";
@@ -2090,35 +2206,40 @@ void HTTPSession::runLoopCallback() noexcept {
   for (uint32_t i = 0; i < kMaxWritesPerLoop; ++i) {
     bodyBytesPerWriteBuf_ = 0;
     if (isPrioritySampled()) {
-      invokeOnAllTransactions(&HTTPTransaction::updateContentionsCount,
-                              txnEgressQueue_.numPendingEgress());
+      invokeOnAllTransactions([this] (HTTPTransaction* txn) {
+          txn->updateContentionsCount(txnEgressQueue_.numPendingEgress());
+        });
     }
 
     bool cork = true;
-    bool som = false;
-    bool eom = false;
-    unique_ptr<IOBuf> writeBuf = getNextToSend(&cork, &som, &eom);
+    bool timestampTx = false;
+    bool timestampAck = false;
+    unique_ptr<IOBuf> writeBuf =
+        getNextToSend(&cork, &timestampTx, &timestampAck);
 
     if (!writeBuf) {
       break;
     }
     uint64_t len = writeBuf->computeChainDataLength();
     VLOG(11) << *this << " bytes of egress to be written: " << len
-             << " cork:" << cork << " eom:" << eom;
+             << " cork:" << cork
+             << " timestampTx:" << timestampTx
+             << " timestampAck:" << timestampAck;
     if (len == 0) {
       checkForShutdown();
       return;
     }
 
     if (isPrioritySampled()) {
-      invokeOnAllTransactions(&HTTPTransaction::updateSessionBytesSheduled,
-                              bodyBytesPerWriteBuf_);
+      invokeOnAllTransactions([this] (HTTPTransaction* txn) {
+          txn->updateSessionBytesSheduled(bodyBytesPerWriteBuf_);
+        });
     }
 
     WriteSegment* segment = new WriteSegment(this, len);
     segment->setCork(cork);
-    segment->setEOR(eom);
-    segment->setTimestampTX(som || eom); // timestamp for buffers w/ som or eom
+    segment->setTimestampTX(timestampTx);
+    segment->setEOR(timestampAck);
 
     pendingWrites_.push_back(*segment);
     if (!writeTimeout_.isScheduled()) {
@@ -2127,8 +2248,10 @@ void HTTPSession::runLoopCallback() noexcept {
     }
     numActiveWrites_++;
     VLOG(4) << *this << " writing " << len
-            << ", activeWrites=" << numActiveWrites_ << " cork=" << cork
-            << " eom=" << eom;
+            << ", activeWrites=" << numActiveWrites_
+            << " cork:" << cork
+            << " timestampTx:" << timestampTx
+            << " timestampAck:" << timestampAck;
     bytesScheduled_ += len;
     sock_->writeChain(segment, std::move(writeBuf), segment->getFlags());
     if (numActiveWrites_ > 0) {
@@ -2172,10 +2295,12 @@ void HTTPSession::updateWriteCount() {
     // Exceeded limit. Pause reading on the incoming stream.
     VLOG(3) << "Pausing egress for " << *this;
     writes_ = SocketState::PAUSED;
+    pauseTransactions();
   } else if (numActiveWrites_ == 0 && writesPaused()) {
     // Dropped below limit. Resume reading on the incoming stream if needed.
     VLOG(3) << "Resuming egress for " << *this;
     writes_ = SocketState::UNPAUSED;
+    resumeTransactions();
   }
 }
 
@@ -2280,7 +2405,9 @@ void HTTPSession::shutdownTransport(bool shutdownReads,
                                             ", ",
                                             getPeerAddress().describe()));
     ex.setProxygenError(error);
-    invokeOnAllTransactions(&HTTPTransaction::onError, ex);
+    invokeOnAllTransactions([&ex] (HTTPTransaction* txn) {
+        txn->onError(ex);
+      });
   }
 
   // Close the socket only after the onError() callback on the txns
@@ -2409,7 +2536,13 @@ bool HTTPSession::shouldShutdown() const {
 }
 
 size_t HTTPSession::sendPing() {
-  const size_t bytes = codec_->generatePingRequest(writeBuf_);
+
+  folly::Optional<uint64_t> data = folly::none;
+  if (getMeasureRttEnabled()) {
+    data = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+  const size_t bytes = codec_->generatePingRequest(writeBuf_, data);
   if (bytes) {
     scheduleWrite();
   }
@@ -2447,11 +2580,15 @@ size_t HTTPSession::sendPriorityImpl(HTTPCodec::StreamID id,
 }
 
 HTTPTransaction* HTTPSession::findTransaction(HTTPCodec::StreamID streamID) {
+  if (lastTxn_ && streamID == lastTxn_->getID()) {
+    return lastTxn_;
+  }
   auto it = transactions_.find(streamID);
   if (it == transactions_.end()) {
     return nullptr;
   } else {
-    return &it->second;
+    lastTxn_ = &it->second;
+    return lastTxn_;
   }
 }
 
@@ -2459,10 +2596,17 @@ HTTPTransaction* HTTPSession::createTransaction(
     HTTPCodec::StreamID streamID,
     const folly::Optional<HTTPCodec::StreamID>& assocStreamID,
     const folly::Optional<HTTPCodec::ExAttributes>& exAttributes,
-    const http2::PriorityUpdate& priority) {
-  if (!sock_->good() || transactions_.count(streamID)) {
-    // Refuse to add a transaction on a closing session or if a
-    // transaction of that ID already exists.
+    const http2::PriorityUpdate& priority,
+    ProxygenError* error) {
+  if (!sock_->good()) {
+    // Refuse to add a transaction on a closing session
+    SET_PROXYGEN_ERROR_IF(error, ProxygenError::kErrorBadSocket);
+    return nullptr;
+  }
+
+  if (transactions_.count(streamID)) {
+    // Refuse to add a transaction if a transaction of that ID already exists.
+    SET_PROXYGEN_ERROR_IF(error, ProxygenError::kErrorDuplicatedStreamId);
     return nullptr;
   }
 
@@ -2518,18 +2662,94 @@ HTTPTransaction* HTTPSession::createTransaction(
   txn->setReceiveWindow(receiveStreamWindowSize_);
 
   if (isUpstream() && !txn->isPushed()) {
-    incrementOutgoingStreams();
+    incrementOutgoingStreams(txn);
     // do not count towards MAX_CONCURRENT_STREAMS for PUSH_PROMISE
   } else if (!(isDownstream() && txn->isPushed())) {
-    incomingStreams_++;
+    incrementIncomingStreams(txn);
   }
+  // Downstream push is counted in HTTPSession::sendHeaders
 
   return txn;
 }
 
-void HTTPSession::incrementOutgoingStreams() {
+void HTTPSession::incrementOutgoingStreams(HTTPTransaction* txn) {
+  DCHECK(txn);
   outgoingStreams_++;
+  txn->setIsCountedTowardsStreamLimit();
   HTTPSessionBase::onNewOutgoingStream(outgoingStreams_);
+}
+
+void HTTPSession::incrementIncomingStreams(HTTPTransaction* txn) {
+  DCHECK(txn);
+  incomingStreams_++;
+  txn->setIsCountedTowardsStreamLimit();
+}
+
+bool HTTPSession::incrementNumControlMsgsInCurInterval(
+    http2::FrameType frameType) {
+  if (rateLimitingCounters_->numControlMsgsInCurrentInterval == 0) {
+    // The first time we get a "control message", we schedule a
+    // function on the event base that clears out the value of
+    // numControlMsgsInCurrentInterval. Once it is cleared, the next
+    // such event that fires causes the function to be scheduled, and the
+    // cycle repeats.
+    scheduleResetNumControlMsgs();
+  }
+
+  (rateLimitingCounters_->numControlMsgsInCurrentInterval)++;
+  if (rateLimitingCounters_->numControlMsgsInCurrentInterval >
+      maxControlMsgsPerInterval_) {
+    LOG(ERROR) << " dropping connection due to too many control messages, "
+               << "num control messages = "
+               << rateLimitingCounters_->numControlMsgsInCurrentInterval
+               << ", most recent frame type = "
+               << getFrameTypeString(frameType) << " "
+               << *this;
+    dropConnection();
+    return true;
+  }
+
+  return false;
+}
+
+bool HTTPSession::incrementDirectErrorHandlingInCurInterval() {
+  if (rateLimitingCounters_->numDirectErrorHandlingInCurrentInterval == 0) {
+    // The first time a direct error handling event fires, we schedule a
+    // function on the event base that clears out the value of
+    // numDirectErrorHandlingInCurrentInterval. Once it is cleared, the next
+    // such event that fires causes the function to be scheduled, and the
+    // cycle repeats.
+    scheduleResetDirectErrorHandling();
+  }
+
+  (rateLimitingCounters_->numDirectErrorHandlingInCurrentInterval)++;
+  if (rateLimitingCounters_->numDirectErrorHandlingInCurrentInterval >
+      maxDirectErrorHandlingPerInterval_) {
+    LOG(ERROR) << " dropping connection due to too many newly created txns "
+               << " when directly handling errors,"
+               << "num direct error handling cases = "
+               << rateLimitingCounters_->numDirectErrorHandlingInCurrentInterval
+               << " "
+               << *this;
+    dropConnection();
+    return true;
+  }
+
+  return false;
+}
+
+void HTTPSession::scheduleResetNumControlMsgs() {
+  auto ptr = rateLimitingCounters_;
+  sock_->getEventBase()->runAfterDelay([ptr]() {
+     ptr->numControlMsgsInCurrentInterval = 0;
+  }, controlMsgIntervalDuration_);
+}
+
+void HTTPSession::scheduleResetDirectErrorHandling() {
+  auto ptr = rateLimitingCounters_;
+  sock_->getEventBase()->runAfterDelay([ptr]() {
+     ptr->numDirectErrorHandlingInCurrentInterval = 0;
+  }, directErrorHandlingIntervalDuration_);
 }
 
 void HTTPSession::onWriteSuccess(uint64_t bytesWritten) {
@@ -2578,6 +2798,10 @@ void HTTPSession::onWriteSuccess(uint64_t bytesWritten) {
     //             data to send...
     if (numActiveWrites_ == 0 && hasMoreWrites()) {
       runLoopCallback();
+    } else {
+      invokeOnAllTransactions([] (HTTPTransaction* txn) {
+          txn->checkIfEgressRateLimitedByUpstream();
+        });
     }
   }
   onWriteCompleted();
@@ -2743,11 +2967,13 @@ void HTTPSession::errorOnTransactionId(HTTPCodec::StreamID id,
 
 void HTTPSession::onConnectionSendWindowOpen() {
   flowControlTimeout_.cancelTimeout();
+  resumeTransactions();
   // We can write more now. Schedule a write.
   scheduleWrite();
 }
 
 void HTTPSession::onConnectionSendWindowClosed() {
+  pauseTransactions();
   if (!txnEgressQueue_.empty()) {
     VLOG(4) << *this << " session stalled by flow control";
     if (sessionStats_) {
@@ -2829,37 +3055,22 @@ void HTTPSession::onReplaySafe() noexcept {
   waitingForReplaySafety_.clear();
 }
 
-void HTTPSession::onFirstByteEvent(HTTPTransaction* txn,
-                                   uint64_t offset,
-                                   bool bufferWriteTracked) noexcept {
-  if (!sock_->isEorTrackingEnabled() || !bufferWriteTracked ||
-      offset != sock_->getAppBytesWritten()) {
-    return;
-  }
-  byteEventTracker_->addTxByteEvent(
-      sock_->getRawBytesWritten(), ByteEvent::EventType::FIRST_BYTE, txn);
-}
-
-void HTTPSession::onLastByteEvent(HTTPTransaction* txn,
-                                  uint64_t offset,
-                                  bool bufferWriteTracked) noexcept {
-  if (!sock_->isEorTrackingEnabled() || !bufferWriteTracked) {
+void HTTPSession::onTxnByteEventWrittenToBuf(const ByteEvent& event) noexcept {
+  if (!sock_->isEorTrackingEnabled() || event.getTransaction() == nullptr ||
+      event.byteOffset_ != sock_->getAppBytesWritten()) {
     return;
   }
 
-  if (offset != sock_->getAppBytesWritten()) {
-    VLOG(2) << "tracking ack to last app byte " << offset << " while "
-            << sock_->getAppBytesWritten()
-            << " app bytes have already been written";
-    return;
+  // by default, we're going to add TX and ACK events whenever they're available
+  const auto& txn = event.getTransaction();
+  if (event.timestampTx_) {
+    byteEventTracker_->addTxByteEvent(
+        sock_->getRawBytesWritten(), event.eventType_, txn);
   }
-
-  VLOG(5) << "tracking raw last byte " << sock_->getRawBytesWritten()
-          << " while the app last byte is " << offset;
-
-  byteEventTracker_->addTxByteEvent(
-      sock_->getRawBytesWritten(), ByteEvent::EventType::LAST_BYTE, txn);
-  byteEventTracker_->addAckByteEvent(sock_->getRawBytesWritten(), txn);
+  if (event.timestampAck_) {
+    byteEventTracker_->addAckByteEvent(
+        sock_->getRawBytesWritten(), event.eventType_, txn);
+  }
 }
 
 bool HTTPSession::isDetachable(bool checkSocket) const {
@@ -2870,5 +3081,23 @@ bool HTTPSession::isDetachable(bool checkSocket) const {
          !writesPaused() && !flowControlTimeout_.isScheduled() &&
          !writeTimeout_.isScheduled() && !drainTimeout_.isScheduled();
 }
+
+void HTTPSession::invokeOnAllTransactions(
+    folly::Function<void(HTTPTransaction*)> fn) {
+  DestructorGuard g(this);
+  std::vector<HTTPCodec::StreamID> ids;
+  for (const auto& txn : transactions_) {
+    ids.push_back(txn.first);
+  }
+  for (auto idit = ids.begin(); idit != ids.end() && !transactions_.empty();
+       ++idit) {
+    auto txn = findTransaction(*idit);
+    if (txn != nullptr) {
+      fn(txn);
+    }
+  }
+}
+
+
 
 } // namespace proxygen

@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <list>
@@ -37,6 +36,14 @@ class HeaderTable {
   HeaderTable& operator=(const HeaderTable&) = delete;
 
   /**
+   * Return Insert Count - the total number of headers inserted to this table,
+   * including evictions
+   */
+  uint32_t getInsertCount() const {
+    return insertCount_;
+  }
+
+  /**
    * Add the header entry at the beginning of the table (index=1)
    *
    * @return true if it was able to add the entry
@@ -49,6 +56,14 @@ class HeaderTable {
    * @return 0 in case the header is not found
    */
   uint32_t getIndex(const HPACKHeader& header) const;
+
+  /**
+   * Get the index of the given header, if found.
+   *
+   * @return 0 in case the header is not found
+   */
+  uint32_t getIndex(const HPACKHeaderName& name,
+                    folly::StringPiece value) const;
 
   /**
    * Get the table entry at the given external index.
@@ -191,6 +206,7 @@ class HeaderTable {
 
   uint32_t size_{0};    // how many entries we have in the table
   uint32_t head_{0};     // points to the first element of the ring
+  uint32_t insertCount_{0};
 
   names_map names_;
 
@@ -199,7 +215,7 @@ class HeaderTable {
    * Shared implementation for getIndex and nameIndex
    */
   uint32_t getIndexImpl(const HPACKHeaderName& header,
-                        const folly::fbstring& value,
+                        folly::StringPiece value,
                         bool nameOnly) const;
 };
 

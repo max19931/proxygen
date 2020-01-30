@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <folly/portability/GMock.h>
@@ -221,9 +220,13 @@ class MockHTTPHandler
         .WillOnce(testing::SaveArg<0>(pTxn ? pTxn : &txn_));
   }
 
-  void expectPushedTransaction(HTTPTransaction** pTxn = nullptr) {
+  void expectPushedTransaction(HTTPTransactionHandler* handler=nullptr) {
     EXPECT_CALL(*this, onPushedTransaction(testing::_))
-        .WillOnce(testing::SaveArg<0>(pTxn ? pTxn : &pushedTxn_));
+      .WillOnce(testing::Invoke([handler] (HTTPTransaction* txn) {
+            if (handler) {
+              txn->setHandler(handler);
+            }
+          }));
   }
 
   void expectHeaders(std::function<void()> callback = std::function<void()>()) {
@@ -477,15 +480,14 @@ class DummyHTTPSessionStats : public HTTPSessionStats {
   void recordTransactionStalled() noexcept override{};
   void recordSessionStalled() noexcept override{};
 
+  void recordPresendIOSplit() noexcept override{};
+  void recordPresendExceedLimit() noexcept override{};
   void recordTTLBAExceedLimit() noexcept override{};
-  void recordTTLBAIOBSplitByEom() noexcept override{};
   void recordTTLBANotFound() noexcept override{};
   void recordTTLBAReceived() noexcept override{};
   void recordTTLBATimeout() noexcept override{};
-  void recordTTLBAEomPassed() noexcept override{};
   void recordTTLBATracked() noexcept override{};
   void recordTTBTXExceedLimit() noexcept override{};
-  void recordTTBTXIOBSplitBySom() noexcept override{};
   void recordTTBTXReceived() noexcept override{};
   void recordTTBTXTimeout() noexcept override{};
   void recordTTBTXNotFound() noexcept override{};

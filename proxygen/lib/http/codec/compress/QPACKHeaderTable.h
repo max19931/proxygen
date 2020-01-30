@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <glog/logging.h>
@@ -32,14 +31,6 @@ class QPACKHeaderTable : public HeaderTable {
   ~QPACKHeaderTable() {}
   QPACKHeaderTable(const QPACKHeaderTable&) = delete;
   QPACKHeaderTable& operator=(const QPACKHeaderTable&) = delete;
-
-  /**
-   * Return Insert Count - the total number of headers inserted to this table,
-   * including evictions
-   */
-  uint32_t getInsertCount() const {
-    return insertCount_;
-  }
 
   /**
    * Returns true if the absolute index has not been ack'ed yet.
@@ -217,12 +208,11 @@ class QPACKHeaderTable : public HeaderTable {
   uint32_t internalToAbsolute(uint32_t internalIndex) const;
   uint32_t absoluteToInternal(uint32_t absoluteIndex) const;
 
-  uint32_t insertCount_{0};
   uint32_t drainedBytes_{0};
   uint32_t minUsable_{1};
   uint32_t ackedInsertCount_{0};
-  std::unique_ptr<std::vector<uint16_t>> refCount_;
   uint32_t minFree_{0};
+  std::unique_ptr<std::vector<uint16_t>> refCount_;
 };
 
 }

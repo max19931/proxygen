@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# Copyright (c) Facebook, Inc. and its affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 ## Run this script to build proxygen and run the tests. If you want to
 ## install proxygen to use in another C++ project on this machine, run
@@ -50,7 +54,9 @@ function install_dependencies_linux() {
     zlib1g-dev \
     binutils-dev \
     libsodium-dev \
-    libzstd-dev
+    libzstd-dev \
+    libdouble-conversion-dev \
+    libfmt-dev 
 }
 
 function install_dependencies_mac() {
@@ -67,7 +73,8 @@ function install_dependencies_mac() {
     xz                       \
     openssl                  \
     libsodium                \
-    zstd
+    zstd                     \
+    fmt
 
   brew link                 \
     cmake                   \
@@ -81,7 +88,8 @@ function install_dependencies_mac() {
     openssl                 \
     xz                      \
     libsodium               \
-    zstd
+    zstd                    \
+    fmt
 }
 
 function install_dependencies() {
@@ -126,10 +134,25 @@ function setup_folly() {
     MAYBE_DISABLE_JEMALLOC="-DFOLLY_USE_JEMALLOC=0"
   fi
 
+  MAYBE_USE_STATIC_DEPS=""
+  MAYBE_BUILD_TESTS=""
+  MAYBE_BUILD_SHARED_LIBS=""
+  if [ "$NO_BUILD_TESTS" == true ] ; then
+    MAYBE_BUILD_TESTS="-DBUILD_TESTS=OFF"
+  fi
+  if [ "$BUILD_FOR_FUZZING" == true ] ; then
+    MAYBE_USE_STATIC_DEPS="-DUSE_STATIC_DEPS_ON_UNIX=ON"
+    MAYBE_BUILD_TESTS="-DBUILD_TESTS=OFF"
+    MAYBE_BUILD_SHARED_LIBS="-DBUILD_SHARED_LIBS=OFF"
+  fi
+
   cmake                                           \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"               \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"            \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo             \
+    "$MAYBE_USE_STATIC_DEPS"                      \
+    "$MAYBE_BUILD_SHARED_LIBS"                    \
+    "$MAYBE_BUILD_TESTS"                          \
     $MAYBE_DISABLE_JEMALLOC                       \
     ..
   make -j "$JOBS"
@@ -147,12 +170,28 @@ function setup_fizz() {
   fi
   cd "$FIZZ_DIR"
   git fetch
+  FIZZ_REV=$(sed 's/Subproject commit //' "$START_DIR"/../build/deps/github_hashes/facebookincubator/fizz-rev.txt)
+  git checkout "$FIZZ_REV"
   echo -e "${COLOR_GREEN}Building Fizz ${COLOR_OFF}"
   mkdir -p "$FIZZ_BUILD_DIR"
   cd "$FIZZ_BUILD_DIR" || exit
+
+  MAYBE_USE_STATIC_DEPS=""
+  MAYBE_USE_SODIUM_STATIC_LIBS=""
+  MAYBE_BUILD_SHARED_LIBS=""
+  if [ "$BUILD_FOR_FUZZING" == true ] ; then
+    MAYBE_USE_STATIC_DEPS="-DUSE_STATIC_DEPS_ON_UNIX=ON"
+    MAYBE_USE_SODIUM_STATIC_LIBS="-Dsodium_USE_STATIC_LIBS=ON"
+    MAYBE_BUILD_SHARED_LIBS="-DBUILD_SHARED_LIBS=OFF"
+  fi
+
   cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo       \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"             \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"          \
+    -DBUILD_TESTS=ON                            \
+    "$MAYBE_USE_STATIC_DEPS"                    \
+    "$MAYBE_BUILD_SHARED_LIBS"                  \
+    "$MAYBE_USE_SODIUM_STATIC_LIBS"             \
     "$FIZZ_DIR/fizz"
   make -j "$JOBS"
   make install
@@ -174,9 +213,25 @@ function setup_wangle() {
   echo -e "${COLOR_GREEN}Building Wangle ${COLOR_OFF}"
   mkdir -p "$WANGLE_BUILD_DIR"
   cd "$WANGLE_BUILD_DIR" || exit
+
+  MAYBE_USE_STATIC_DEPS=""
+  MAYBE_BUILD_TESTS=""
+  MAYBE_BUILD_SHARED_LIBS=""
+  if [ "$NO_BUILD_TESTS" == true ] ; then
+    MAYBE_BUILD_TESTS="-DBUILD_TESTS=OFF"
+  fi
+  if [ "$BUILD_FOR_FUZZING" == true ] ; then
+    MAYBE_USE_STATIC_DEPS="-DUSE_STATIC_DEPS_ON_UNIX=ON"
+    MAYBE_BUILD_TESTS="-DBUILD_TESTS=OFF"
+    MAYBE_BUILD_SHARED_LIBS="-DBUILD_SHARED_LIBS=OFF"
+  fi
+
   cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo       \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"             \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"          \
+    "$MAYBE_USE_STATIC_DEPS"                    \
+    "$MAYBE_BUILD_SHARED_LIBS"                  \
+    "$MAYBE_BUILD_TESTS"                        \
     "$WANGLE_DIR/wangle"
   make -j "$JOBS"
   make install
@@ -193,12 +248,31 @@ function setup_mvfst() {
   fi
   cd "$MVFST_DIR"
   git fetch
+  MVFST_REV=$(sed 's/Subproject commit //' "$START_DIR"/../build/deps/github_hashes/facebookincubator/mvfst-rev.txt)
+  git checkout "$MVFST_REV"
   echo -e "${COLOR_GREEN}Building Mvfst ${COLOR_OFF}"
   mkdir -p "$MVFST_BUILD_DIR"
   cd "$MVFST_BUILD_DIR" || exit
+
+  MAYBE_USE_STATIC_DEPS=""
+  MAYBE_BUILD_TESTS=""
+  MAYBE_BUILD_SHARED_LIBS=""
+  if [ "$NO_BUILD_TESTS" == true ] ; then
+    MAYBE_BUILD_TESTS="-DBUILD_TESTS=OFF"
+  fi
+  if [ "$BUILD_FOR_FUZZING" == true ] ; then
+    MAYBE_USE_STATIC_DEPS="-DUSE_STATIC_DEPS_ON_UNIX=ON"
+    MAYBE_BUILD_TESTS="-DBUILD_TESTS=OFF"
+    MAYBE_BUILD_SHARED_LIBS="-DBUILD_SHARED_LIBS=OFF"
+  fi
+
+
   cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo       \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"             \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"          \
+    "$MAYBE_USE_STATIC_DEPS"                    \
+    "$MAYBE_BUILD_SHARED_LIBS"                  \
+    "$MAYBE_BUILD_TESTS"                        \
     "$MVFST_DIR"
   make -j "$JOBS"
   make install
@@ -206,13 +280,11 @@ function setup_mvfst() {
   cd "$BWD" || exit
 }
 
-detect_platform
-install_dependencies
-
 # Parse args
 JOBS=8
 WITH_QUIC=false
-USAGE="./deps.sh [-j num_jobs] [-q|--with-quic] [-m|--no-jemalloc]"
+INSTALL_DEPENDENCIES=true
+USAGE="./deps.sh [-j num_jobs] [-q|--with-quic] [-m|--no-jemalloc] [--no-install-dependencies]"
 while [ "$1" != "" ]; do
   case $1 in
     -j | --jobs ) shift
@@ -224,12 +296,26 @@ while [ "$1" != "" ]; do
     -m | --no-jemalloc )
                   NO_JEMALLOC=true
                   ;;
+    --no-install-dependencies )
+                  INSTALL_DEPENDENCIES=false
+          ;;
+    --build-for-fuzzing )
+                  BUILD_FOR_FUZZING=true
+      ;;
+    -t | --no-tests )
+                  NO_BUILD_TESTS=true
+      ;;
     * )           echo $USAGE
                   exit 1
 esac
 shift
 done
 
+detect_platform
+
+if [ "$INSTALL_DEPENDENCIES" == true ] ; then
+  install_dependencies
+fi
 
 BUILD_DIR=_build
 mkdir -p $BUILD_DIR
@@ -254,17 +340,35 @@ if [ "$WITH_QUIC" == true ] ; then
   MAYBE_BUILD_QUIC="-DBUILD_QUIC=On"
 fi
 
+MAYBE_BUILD_FUZZERS=""
+MAYBE_USE_STATIC_DEPS=""
+MAYBE_LIB_FUZZING_ENGINE=""
+MAYBE_BUILD_SHARED_LIBS=""
+MAYBE_BUILD_TESTS="-DBUILD_TESTS=ON"
+if [ "$NO_BUILD_TESTS" == true ] ; then
+  MAYBE_BUILD_TESTS="-DBUILD_TESTS=OFF"
+fi
+if [ "$BUILD_FOR_FUZZING" == true ] ; then
+  MAYBE_BUILD_FUZZERS="-DBUILD_FUZZERS=ON"
+  MAYBE_USE_STATIC_DEPS="-DUSE_STATIC_DEPS_ON_UNIX=ON"
+  MAYBE_LIB_FUZZING_ENGINE="-DLIB_FUZZING_ENGINE='$LIB_FUZZING_ENGINE'"
+  MAYBE_BUILD_SHARED_LIBS="-DBUILD_SHARED_LIBS=OFF"
+fi
+
 # Build proxygen with cmake
 cd "$BWD" || exit
 cmake                                     \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo       \
   -DCMAKE_PREFIX_PATH="$DEPS_DIR"         \
   -DCMAKE_INSTALL_PREFIX="$BWD"           \
-  $MAYBE_BUILD_QUIC                       \
-  -DBUILD_TESTS=On                        \
+  "$MAYBE_BUILD_QUIC"                     \
+  "$MAYBE_BUILD_TESTS"                    \
+  "$MAYBE_BUILD_FUZZERS"                  \
+  "$MAYBE_BUILD_SHARED_LIBS"              \
+  "$MAYBE_USE_STATIC_DEPS"                \
+  "$MAYBE_LIB_FUZZING_ENGINE"             \
   ../..
 
 make -j "$JOBS"
 echo -e "${COLOR_GREEN}Proxygen build is complete. To run unit test: \
   cd _build/ && make test ${COLOR_OFF}"
-

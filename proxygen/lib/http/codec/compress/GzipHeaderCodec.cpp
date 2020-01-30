@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/compress/GzipHeaderCodec.h>
 
 #include <folly/Memory.h>
@@ -20,13 +19,10 @@
 #include <string>
 
 using folly::IOBuf;
-using folly::ThreadLocalPtr;
 using folly::io::Cursor;
 using namespace proxygen;
 using proxygen::compress::Header;
 using proxygen::compress::HeaderPiece;
-using proxygen::compress::HeaderPieceList;
-using proxygen::spdy::kMaxFrameLength;
 using std::string;
 using std::unique_ptr;
 using std::vector;
@@ -377,7 +373,7 @@ GzipHeaderCodec::parseNameValues(const folly::IOBuf& uncompressed,
 
   try {
     numNV = versionSettings_.parseSizeFun(&headerCursor);
-  } catch (const std::out_of_range& ex) {
+  } catch (const std::out_of_range&) {
     return folly::makeUnexpected(GzipDecodeError::BAD_ENCODING);
   }
 
@@ -386,7 +382,7 @@ GzipHeaderCodec::parseNameValues(const folly::IOBuf& uncompressed,
     try {
       len = versionSettings_.parseSizeFun(&headerCursor);
       uncompressedLength -= versionSettings_.nameValueSize;
-    } catch (const std::out_of_range& ex) {
+    } catch (const std::out_of_range&) {
       return folly::makeUnexpected(GzipDecodeError::BAD_ENCODING);
     }
 

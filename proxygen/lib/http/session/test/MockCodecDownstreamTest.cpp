@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <boost/optional/optional_io.hpp>
 #include <fizz/record/Extensions.h>
 #include <fizz/record/Types.h>
@@ -939,7 +938,6 @@ TEST_F(MockCodecDownstreamTest, DoubleResume) {
 void MockCodecDownstreamTest::testConnFlowControlBlocked(bool timeout) {
   // Let the connection level flow control window fill and then make sure
   // control frames still can be processed
-  InSequence enforceOrder;
   NiceMock<MockHTTPHandler> handler1;
   NiceMock<MockHTTPHandler> handler2;
   auto wantToWrite = spdy::kInitialWindow + 50000;

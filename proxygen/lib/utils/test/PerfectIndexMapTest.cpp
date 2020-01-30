@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <folly/portability/GTest.h>
 #include <proxygen/lib/http/HTTPCommonHeaders.h>
 #include <proxygen/lib/utils/PerfectIndexMap.h>
@@ -71,7 +70,7 @@ typedef testing::Types<
       false,
       true,
       HTTPHeaderCodeCommonOffset,
-      HTTPCommonHeaders::num_header_codes>,
+      HTTPCommonHeaders::num_codes>,
     PerfectIndexMapTestsTemplateParams<
       HTTPHeaderCode,
       HTTP_HEADER_OTHER,
@@ -80,7 +79,7 @@ typedef testing::Types<
       true,
       true,
       HTTPHeaderCodeCommonOffset,
-      HTTPCommonHeaders::num_header_codes>,
+      HTTPCommonHeaders::num_codes>,
     PerfectIndexMapTestsTemplateParams<
       HTTPHeaderCode,
       HTTP_HEADER_OTHER,
@@ -89,7 +88,7 @@ typedef testing::Types<
       true,
       false,
       HTTPHeaderCodeCommonOffset,
-      HTTPCommonHeaders::num_header_codes>,
+      HTTPCommonHeaders::num_codes>,
     PerfectIndexMapTestsTemplateParams<
       HTTPHeaderCode,
       HTTP_HEADER_OTHER,
@@ -98,7 +97,7 @@ typedef testing::Types<
       false,
       false,
       HTTPHeaderCodeCommonOffset,
-      HTTPCommonHeaders::num_header_codes>
+      HTTPCommonHeaders::num_codes>
   > TestTypes;
 TYPED_TEST_CASE(PerfectIndexMapTests, TestTypes);
 

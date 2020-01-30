@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <folly/Conv.h>
 #include <folly/ScopeGuard.h>
 #include <folly/io/IOBuf.h>
@@ -63,7 +62,8 @@ class CompressionFilterTest : public Test {
                             std::string responseContentType,
                             std::unique_ptr<folly::IOBuf> originalResponseBody,
                             int32_t compressionLevel = 4,
-                            uint32_t minimumCompressionSize = 1) {
+                            uint32_t minimumCompressionSize = 1,
+                            bool sendCompressedResponse = false) {
 
     // If there is only one IOBuf, then it's not chunked.
     bool isResponseChunked = originalResponseBody->isChained();
@@ -176,8 +176,15 @@ class CompressionFilterTest : public Test {
 
       ResponseBuilder(downstream_).sendWithEOM();
 
+    } else if(sendCompressedResponse) {
+       // Send unchunked response
+      ResponseBuilder(downstream_)
+          .status(200, "OK")
+          .header(HTTP_HEADER_CONTENT_TYPE, responseContentType)
+          .header(HTTP_HEADER_CONTENT_ENCODING, "gzip")
+          .body(originalResponseBody->clone())
+          .sendWithEOM();
     } else {
-
       // Send unchunked response
       ResponseBuilder(downstream_)
           .status(200, "OK")
@@ -271,6 +278,26 @@ TEST_F(CompressionFilterTest, MultipleAcceptedEncodings) {
                          std::string("Hello World"),
                          std::string("text/html"),
                          folly::IOBuf::copyBuffer("Hello World"));
+  });
+}
+
+// Server skips compressing if the response is already compressed
+TEST_F(CompressionFilterTest, ResponseAlreadyCompressedTest) {
+  auto compressor =
+      std::make_unique<ZlibStreamCompressor>(CompressionType::GZIP, 4);
+  auto compressed =
+      compressor->compress(folly::IOBuf::copyBuffer("Hello World").get());
+  ASSERT_NO_FATAL_FAILURE({
+    exercise_compression(true,
+                         std::string("http://locahost/foo.compressme"),
+                         std::string("gzip"),
+                         std::string("gzip"),
+                         std::string("Hello World"),
+                         std::string("text/html"),
+                         std::move(compressed),
+                         4,
+                         1,
+                         true /*SendCompressedResponse*/);
   });
 }
 

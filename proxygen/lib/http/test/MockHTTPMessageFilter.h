@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <gmock/gmock.h>
@@ -30,7 +29,9 @@ class MockHTTPMessageFilter : public HTTPMessageFilter {
   void onBody(std::unique_ptr<folly::IOBuf> chain) noexcept override {
     onBody(std::shared_ptr<folly::IOBuf>(chain.release()));
   }
+  MOCK_QUALIFIED_METHOD0(pause, noexcept, void());
   MOCK_QUALIFIED_METHOD1(onChunkHeader, noexcept, void(size_t));
+  MOCK_QUALIFIED_METHOD1(resume, noexcept, void(uint64_t));
   MOCK_QUALIFIED_METHOD0(onChunkComplete, noexcept, void());
   MOCK_QUALIFIED_METHOD1(onTrailers,
                          noexcept,
@@ -49,6 +50,10 @@ class MockHTTPMessageFilter : public HTTPMessageFilter {
 
   const std::string& getFilterName() noexcept override {
     return kMockFilterName;
+  }
+
+  boost::variant<HTTPMessageFilter*, HTTPTransaction*> getPrevElement() {
+    return prev_;
   }
 
   [[noreturn]] std::unique_ptr<HTTPMessageFilter> clone() noexcept override {

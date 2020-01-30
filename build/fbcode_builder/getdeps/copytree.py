@@ -1,15 +1,16 @@
-# Copyright (c) 2019-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import os
 import shutil
 import subprocess
+
+
+PREFETCHED_DIRS = set()
 
 
 def is_eden(dirpath):
@@ -31,7 +32,8 @@ def prefetch_dir_if_eden(dirpath):
     performed by copytree makes this more expensive than is desirable
     so we help accelerate things by performing a prefetch on the
     source directory """
-    if not is_eden(dirpath):
+    global PREFETCHED_DIRS
+    if not is_eden(dirpath) or dirpath in PREFETCHED_DIRS:
         return
     root = find_eden_root(dirpath)
     rel = os.path.relpath(dirpath, root)
@@ -39,6 +41,7 @@ def prefetch_dir_if_eden(dirpath):
     # TODO: this should be edenfsctl but until I swing through a new
     # package deploy, I only have `eden` on my mac to test this
     subprocess.call(["eden", "prefetch", "--repo", root, "--silent", "%s/**" % rel])
+    PREFETCHED_DIRS.add(dirpath)
 
 
 def copytree(src_dir, dest_dir, ignore=None):

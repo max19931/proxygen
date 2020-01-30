@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <fizz/protocol/Certificate.h>
@@ -42,6 +41,13 @@ class HTTPSessionStats;
 constexpr uint32_t kDefaultMaxConcurrentOutgoingStreamsRemote = 100000;
 constexpr uint32_t kDefaultMaxConcurrentIncomingStreams = 100;
 
+// These constants define the rate at which we limit certain events.
+constexpr uint32_t kDefaultMaxControlMsgsPerInterval = 50000;
+constexpr uint32_t kDefaultControlMsgDuration = 100; // milliseconds
+
+constexpr uint32_t kDefaultMaxDirectErrorHandlingPerInterval = 100;
+constexpr uint32_t kDefaultDirectErrorHandlingDuration = 100; // milliseconds
+
 class HTTPSession
     : public HTTPSessionBase
     , public HTTPTransaction::Transport
@@ -56,8 +62,8 @@ class HTTPSession
  public:
   using UniquePtr = std::unique_ptr<HTTPSession, Destructor>;
 
-  HTTPSessionBase::SessionType getType() const noexcept override {
-    return HTTPSessionBase::SessionType::HTTP;
+  HTTPTransaction::Transport::Type getType() const noexcept override {
+    return HTTPTransaction::Transport::Type::TCP;
   }
 
   folly::AsyncTransportWrapper* getTransport() override {
@@ -77,6 +83,10 @@ class HTTPSession
 
   bool hasActiveTransactions() const override {
     return !transactions_.empty();
+  }
+
+  uint32_t getNumStreams() const override {
+    return static_cast<uint32_t>(transactions_.size());
   }
 
   uint32_t getNumOutgoingStreams() const override {
@@ -122,6 +132,26 @@ class HTTPSession
     HTTPSessionBase::setHTTP2PrioritiesEnabled(enabled);
   }
 
+  void setRttMeasurementEnabled(bool enabled) override {
+    setMeasureRttEnabled(enabled);
+  }
+
+  bool isRttMeasurementEnabled() const override {
+    return getMeasureRttEnabled();
+  }
+
+  folly::Optional<std::chrono::milliseconds> getMeasuredSrtt() const override {
+    if (!measuredRtt_.hasValue()) {
+      return folly::none;
+    }
+    return measuredRtt_->srtt;
+  }
+
+  void measureRttWithPing() override {
+    sendPing();
+  }
+
+
   const folly::SocketAddress& getLocalAddress() const noexcept override {
     return HTTPSessionBase::getLocalAddress();
   }
@@ -135,6 +165,10 @@ class HTTPSession
   }
 
   bool getCurrentTransportInfo(wangle::TransportInfo* tinfo) override;
+
+  void getFlowControlInfo(HTTPTransaction::FlowControlInfo* info) override;
+
+  HTTPTransaction::Transport::Type getSessionType() const noexcept override;
 
   /**
    * Set the maximum number of transactions the remote can open at once.
@@ -228,6 +262,23 @@ class HTTPSession
    */
   void setSecondAuthManager(
       std::unique_ptr<SecondaryAuthManagerBase> secondAuthManager);
+
+  void setMaxControlMsgsPerInterval(uint32_t val) {
+      maxControlMsgsPerInterval_ = val;
+  }
+
+  void setControlMsgIntervalDuration(uint32_t val) {
+      controlMsgIntervalDuration_ = val;
+  }
+
+  void setMaxDirectErrorHandlingPerInterval(uint32_t val) {
+      maxDirectErrorHandlingPerInterval_ = val;
+  }
+
+  void setDirectErrorHandlingIntervalDuration(uint32_t val) {
+      directErrorHandlingIntervalDuration_ = val;
+  }
+
 
   /**
    * Get the SecondaryAuthManager attached to this session.
@@ -324,7 +375,9 @@ class HTTPSession
    * Gets the next IOBuf to send (either writeBuf_ or new egress from
    * the priority queue), and sets cork appropriately
    */
-  std::unique_ptr<folly::IOBuf> getNextToSend(bool* cork, bool* som, bool* eom);
+  std::unique_ptr<folly::IOBuf> getNextToSend(bool* cork,
+                                              bool* timestampTx,
+                                              bool* timestampAck);
 
   void decrementTransactionCount(HTTPTransaction* txn,
                                  bool ingressEOM,
@@ -348,6 +401,8 @@ class HTTPSession
       uint8_t) override {
     return folly::none;
   }
+
+  void setNewTransactionPauseState(HTTPTransaction* txn) override;
 
   void readTimeoutExpired() noexcept;
   void writeTimeoutExpired() noexcept;
@@ -392,8 +447,8 @@ class HTTPSession
   void onGoaway(uint64_t lastGoodStreamID,
                 ErrorCode code,
                 std::unique_ptr<folly::IOBuf> debugData = nullptr) override;
-  void onPingRequest(uint64_t uniqueID) override;
-  void onPingReply(uint64_t uniqueID) override;
+  void onPingRequest(uint64_t data) override;
+  void onPingReply(uint64_t data) override;
   void onWindowUpdate(HTTPCodec::StreamID stream, uint32_t amount) override;
   void onSettings(const SettingsList& settings) override;
   void onSettingsAck() override;
@@ -438,7 +493,8 @@ class HTTPSession
   void notifyEgressBodyBuffered(int64_t bytes) noexcept override;
   HTTPTransaction* newPushedTransaction(
       HTTPCodec::StreamID assocStreamId,
-      HTTPTransaction::PushHandler* handler) noexcept override;
+      HTTPTransaction::PushHandler* handler,
+      ProxygenError* error = nullptr) noexcept override;
   HTTPTransaction* newExTransaction(
       HTTPTransaction::Handler* handler,
       HTTPCodec::StreamID controlStream,
@@ -550,7 +606,8 @@ class HTTPSession
       HTTPCodec::StreamID streamID,
       const folly::Optional<HTTPCodec::StreamID>& assocStreamID,
       const folly::Optional<HTTPCodec::ExAttributes>& exAttributes,
-      const http2::PriorityUpdate& priority = http2::DefaultPriority);
+      const http2::PriorityUpdate& priority = http2::DefaultPriority,
+      ProxygenError* error = nullptr);
 
   /** Invoked by WriteSegment on completion of a write. */
   void onWriteSuccess(uint64_t bytesWritten);
@@ -591,25 +648,10 @@ class HTTPSession
    * but runs in O(n*log n) and if the callback *adds* transactions,
    * they will not get the callback.
    */
-  template <typename... Args1, typename... Args2>
-  void invokeOnAllTransactions(void (HTTPTransaction::*fn)(Args1...),
-                               Args2&&... args) {
-    DestructorGuard g(this);
-    std::vector<HTTPCodec::StreamID> ids;
-    for (const auto& txn : transactions_) {
-      ids.push_back(txn.first);
-    }
-    for (auto idit = ids.begin(); idit != ids.end() && !transactions_.empty();
-         ++idit) {
-      auto txn = findTransaction(*idit);
-      if (txn != nullptr) {
-        (txn->*fn)(std::forward<Args2>(args)...);
-      }
-    }
-  }
+  void invokeOnAllTransactions(folly::Function<void(HTTPTransaction*)> fn);
 
   void pauseTransactions() override {
-    invokeOnAllTransactions(&HTTPTransaction::pauseEgress);
+    invokeOnAllTransactions([] (HTTPTransaction* txn) { txn->pauseEgress(); });
   }
 
   /**
@@ -703,7 +745,7 @@ class HTTPSession
   /** Chain of ingress IOBufs */
   folly::IOBufQueue readBuf_{folly::IOBufQueue::cacheChainLength()};
 
-  std::map<HTTPCodec::StreamID, HTTPTransaction> transactions_;
+  std::unordered_map<HTTPCodec::StreamID, HTTPTransaction> transactions_;
 
   /** Count of transactions awaiting input */
   uint32_t liveTransactions_{0};
@@ -782,12 +824,7 @@ class HTTPSession
 
   // ByteEventTracker::Callback functions
   void onPingReplyLatency(int64_t latency) noexcept override;
-  void onFirstByteEvent(HTTPTransaction* txn,
-                        uint64_t offset,
-                        bool bufferWriteTracked) noexcept override;
-  void onLastByteEvent(HTTPTransaction* txn,
-                       uint64_t offset,
-                       bool bufferWriteTracked) noexcept override;
+  void onTxnByteEventWrittenToBuf(const ByteEvent& event) noexcept override;
   void onDeleteTxnByteEvent() noexcept override;
 
   /**
@@ -856,7 +893,19 @@ class HTTPSession
   bool maybeResumePausedPipelinedTransaction(size_t oldStreamCount,
                                              uint32_t txnSeqn);
 
-  void incrementOutgoingStreams();
+  void incrementOutgoingStreams(HTTPTransaction* txn);
+  void incrementIncomingStreams(HTTPTransaction* txn);
+
+
+  // returns true if the threshold has been exceeded
+  bool incrementNumControlMsgsInCurInterval(http2::FrameType frameType);
+
+  // returns true if the rate limiting threshold has been exceeded
+  bool incrementDirectErrorHandlingInCurInterval();
+
+  void scheduleResetNumControlMsgs();
+
+  void scheduleResetDirectErrorHandling();
 
   // private members
 
@@ -975,12 +1024,40 @@ class HTTPSession
    */
   uint64_t bodyBytesPerWriteBuf_{0};
 
+  struct RateLimitingCounters {
+    /**
+     * The two variables below keep track of the number of Control messages,
+     * and the number of error handling events that are handled by a newly created
+     * transaction handler seen in the current interval, respectively. These are
+     * shared_ptrs, as opposed to uint64_ts because we don't want to run into
+     * lifetime issues where the HTTPSession is destructed, and the rate
+     * limiting function is still scheduled to run on the event base.
+     */
+    uint64_t numControlMsgsInCurrentInterval{0};
+    uint64_t numDirectErrorHandlingInCurrentInterval{0};
+  };
+
+  std::shared_ptr<RateLimitingCounters> rateLimitingCounters_;
+
+  /*
+   * If the number of control messages in a controlMsgIntervalDuration_
+   * millisecond interval exceeds maxControlMsgsPerInterval_, we drop the
+   * connection
+   */
+  uint32_t maxControlMsgsPerInterval_{kDefaultMaxControlMsgsPerInterval};
+  uint32_t controlMsgIntervalDuration_{kDefaultControlMsgDuration};
+
+  uint32_t maxDirectErrorHandlingPerInterval_{kDefaultMaxDirectErrorHandlingPerInterval};
+  uint32_t directErrorHandlingIntervalDuration_{kDefaultDirectErrorHandlingDuration};
+
   /**
    * Container to hold the results of HTTP2PriorityQueue::nextEgress
    */
   HTTP2PriorityQueue::NextEgressResult nextEgressResults_;
 
   std::shared_ptr<ByteEventTracker> byteEventTracker_{nullptr};
+
+  HTTPTransaction* lastTxn_{nullptr};
 
   /**
    * Max number of bytes to egress per session
@@ -1077,6 +1154,7 @@ class HTTPSession
   bool inLoopCallback_ : 1;
   bool inResume_ : 1;
   bool pendingPause_ : 1;
+  bool writeBufSplit_ : 1;
 };
 
 } // namespace proxygen

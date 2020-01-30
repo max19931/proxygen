@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/HTTP1xCodec.h>
 
 #include <folly/Memory.h>
@@ -470,10 +469,12 @@ HTTP1xCodec::generateHeader(IOBufQueue& writeBuf,
     }
     appendLiteral(writeBuf, len, " ");
     appendString(writeBuf, len, msg.getURL());
-    appendLiteral(writeBuf, len, " HTTP/");
-    appendUint(writeBuf, len, version.first);
-    appendLiteral(writeBuf, len, ".");
-    appendUint(writeBuf, len, version.second);
+    if (version != HTTPMessage::kHTTPVersion09) {
+      appendLiteral(writeBuf, len, " HTTP/");
+      appendUint(writeBuf, len, version.first);
+      appendLiteral(writeBuf, len, ".");
+      appendUint(writeBuf, len, version.second);
+    }
     mayChunkEgress_ = (version.first == 1) && (version.second >= 1);
     if (!upgradeHeader_.empty()) {
       LOG(DFATAL) << "Attempted to pipeline HTTP request with pending upgrade";
@@ -481,6 +482,7 @@ HTTP1xCodec::generateHeader(IOBufQueue& writeBuf,
     }
     break;
   }
+  appendLiteral(writeBuf, len, CRLF);
 
   if (keepalive_ &&
       (!msg.wantsKeepalive() ||
@@ -494,7 +496,6 @@ HTTP1xCodec::generateHeader(IOBufQueue& writeBuf,
     keepalive_ = false;
   }
   egressChunked_ &= mayChunkEgress_;
-  appendLiteral(writeBuf, len, CRLF);
   if (version == HTTPMessage::kHTTPVersion09) {
     parser_.http_major = 0;
     parser_.http_minor = 9;
@@ -1128,6 +1129,7 @@ HTTP1xCodec::onHeadersComplete(size_t len) {
 
   headersComplete_ = true;
   headerSize_.uncompressed += len;
+  headerSize_.compressed += len;
   msg_->setIngressHeaderSize(headerSize_);
 
   if (userAgent_.empty()) {

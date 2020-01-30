@@ -1,15 +1,15 @@
 /*
- *  Copyright (c) 2019-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/HQStreamCodec.h>
 #include <folly/Format.h>
 #include <folly/ScopeGuard.h>
+#include <folly/SingletonThreadLocal.h>
 #include <folly/io/Cursor.h>
 #include <proxygen/lib/http/HTTP3ErrorCode.h>
 #include <proxygen/lib/http/codec/HQUtils.h>
@@ -52,7 +52,6 @@ ParseResult HQStreamCodec::checkFrameAllowed(FrameType type) {
     case hq::FrameType::SETTINGS:
     case hq::FrameType::GOAWAY:
     case hq::FrameType::MAX_PUSH_ID:
-    case hq::FrameType::PRIORITY:
     case hq::FrameType::CANCEL_PUSH:
       return HTTP3::ErrorCode::HTTP_WRONG_STREAM;
     case hq::FrameType::PUSH_PROMISE:
@@ -201,10 +200,10 @@ ParseResult HQStreamCodec::parsePushPromise(Cursor& cursor,
   return res;
 }
 
-void HQStreamCodec::onHeader(const folly::fbstring& name,
+void HQStreamCodec::onHeader(const HPACKHeaderName& name,
                              const folly::fbstring& value) {
   if (decodeInfo_.onHeader(name, value)) {
-    if (name == "user-agent" && userAgent_.empty()) {
+    if (userAgent_.empty() && name.getHeaderCode() == HTTP_HEADER_USER_AGENT) {
       userAgent_ = value.toStdString();
     }
   } else {
@@ -509,8 +508,13 @@ void HQStreamCodec::generateHeaderImpl(folly::IOBufQueue& writeBuf,
                                        const HTTPMessage& msg,
                                        folly::Optional<StreamID> pushId,
                                        HTTPHeaderSize* size) {
-  std::vector<std::string> temps;
-  auto allHeaders = CodecUtil::prepareMessageForCompression(msg, temps);
+  static folly::ThreadLocal<std::vector<std::string>> tempsTL;
+  static folly::ThreadLocal<std::vector<compress::Header>> allHeadersTL;
+  auto& temps = *tempsTL.get();
+  auto& allHeaders = *allHeadersTL.get();
+  temps.clear();
+  allHeaders.clear();
+  CodecUtil::prepareMessageForCompression(msg, allHeaders, temps);
   auto result =
       headerCodec_.encode(allHeaders, streamId_, maxEncoderStreamData());
   if (size) {

@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/EventUtil.h>
 #include <folly/io/async/test/MockTimeoutManager.h>
@@ -97,7 +96,7 @@ class TimeoutTest : public testing::Test {
     EXPECT_CALL(timeoutManager_, scheduleTimeout(_, _))
       .WillRepeatedly(Invoke([this] (AsyncTimeout* p, milliseconds t) {
             timeoutManager_.cancelTimeout(p);
-            folly::event_ref_flags(p->getEvent()) |= EVLIST_TIMEOUT;
+            folly::event_ref_flags(p->getEvent()->getEvent()) |= EVLIST_TIMEOUT;
             timeouts_.emplace(t + timeoutClock_.millisecondsSinceEpoch(),
                              p);
             return true;
@@ -129,7 +128,8 @@ class TimeoutTest : public testing::Test {
            timeoutClock_.millisecondsSinceEpoch() >= timeouts_.begin()->first) {
       AsyncTimeout* timeout = timeouts_.begin()->second;
       timeouts_.erase(timeouts_.begin());
-      folly::event_ref_flags(timeout->getEvent()) &= ~EVLIST_TIMEOUT;
+      folly::event_ref_flags(timeout->getEvent()->getEvent())
+              &= ~EVLIST_TIMEOUT;
       timeout->timeoutExpired();
     }
   }

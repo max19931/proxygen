@@ -1,9 +1,8 @@
-# Copyright (c) 2019-present, Facebook, Inc.
+# Copyright (c) Facebook, Inc. and its affiliates.
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# LICENSE file in the root directory of this source tree.
 
 file(
     MAKE_DIRECTORY
@@ -13,30 +12,19 @@ file(
 
 add_custom_command(
     OUTPUT ${PROXYGEN_GENERATED_ROOT}/proxygen/lib/http/HTTPCommonHeaders.h
-    COMMAND
-        ${CMAKE_CURRENT_SOURCE_DIR}/http/gen_HTTPCommonHeaders.h.sh
-        ${CMAKE_CURRENT_SOURCE_DIR}/http/HTTPCommonHeaders.txt
-        ${PROXYGEN_FBCODE_ROOT}
-        ${PROXYGEN_GENERATED_ROOT}/proxygen/lib/http
-    DEPENDS
-        ${CMAKE_CURRENT_SOURCE_DIR}/http/gen_HTTPCommonHeaders.h.sh
-        ${CMAKE_CURRENT_SOURCE_DIR}/http/HTTPCommonHeaders.template.h
-        ${CMAKE_CURRENT_SOURCE_DIR}/http/HTTPCommonHeaders.txt
-    COMMENT "Generating HTTPCommonHeaders.h"
-)
-add_custom_command(
     OUTPUT ${PROXYGEN_GENERATED_ROOT}/proxygen/lib/http/HTTPCommonHeaders.cpp
     COMMAND
-        ${CMAKE_CURRENT_SOURCE_DIR}/http/gen_HTTPCommonHeaders.cpp.sh
+        ${CMAKE_CURRENT_SOURCE_DIR}/http/gen_HTTPCommonHeaders.sh
         ${CMAKE_CURRENT_SOURCE_DIR}/http/HTTPCommonHeaders.txt
         ${PROXYGEN_FBCODE_ROOT}
         ${PROXYGEN_GENERATED_ROOT}/proxygen/lib/http
-        ${PROXYGEN_GPERF}
     DEPENDS
-        ${CMAKE_CURRENT_SOURCE_DIR}/http/gen_HTTPCommonHeaders.h.sh
-        ${CMAKE_CURRENT_SOURCE_DIR}/http/HTTPCommonHeaders.template.gperf
+        ${CMAKE_CURRENT_SOURCE_DIR}/http/gen_HTTPCommonHeaders.sh
         ${CMAKE_CURRENT_SOURCE_DIR}/http/HTTPCommonHeaders.txt
-    COMMENT "Generating HTTPCommonHeaders.cpp"
+        ${CMAKE_CURRENT_SOURCE_DIR}/utils/gen_perfect_hash_table.sh
+        ${CMAKE_CURRENT_SOURCE_DIR}/utils/perfect_hash_table_template.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/utils/perfect_hash_table_template.cpp.gperf
+    COMMENT "Generating HTTPCommonHeaders.h and HTTPCommonHeaders.cpp"
 )
 add_custom_command(
     OUTPUT
@@ -75,6 +63,7 @@ if (BUILD_QUIC)
         ${HTTP3_SOURCES}
         http/SynchronizedLruQuicPskCache.cpp
         http/HTTP3ErrorCode.cpp
+        http/HQConnector.cpp
         http/codec/HQControlCodec.cpp
         http/codec/HQFramedCodec.cpp
         http/codec/HQFramer.cpp
@@ -151,10 +140,12 @@ add_library(
     http/connpool/ThreadIdleSessionController.cpp
     http/experimental/RFC1867.cpp
     http/HTTPConnector.cpp
+    http/HTTPConnectorWithFizz.cpp
     http/HTTPConstants.cpp
     http/HTTPException.cpp
     http/HTTPHeaders.cpp
     http/HTTPMessage.cpp
+    http/HTTPMessageFilters.cpp
     http/HTTPMethod.cpp
     http/ProxygenErrorEnum.cpp
     http/RFC2616.cpp
@@ -231,7 +222,7 @@ target_link_libraries(
     Folly::folly
     fizz::fizz
     wangle::wangle
-    zstd::zstd
+    zstd
     Boost::boost
     Boost::iostreams
     ${HTTP3_DEPEND_LIBS}

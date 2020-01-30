@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2019-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <folly/portability/GMock.h>
@@ -308,6 +307,7 @@ class MockConnectCallback : public HQSession::ConnectCallback {
   MOCK_METHOD0(connectSuccess, void());
   MOCK_METHOD0(onReplaySafe, void());
   MOCK_METHOD1(connectError, void(std::pair<quic::QuicErrorCode, std::string>));
+  MOCK_METHOD0(onFirstPeerPacketProcessed, void());
 };
 
 class MockHQSession : public HQSession {
@@ -434,6 +434,23 @@ class MockHQSession : public HQSession {
 
     return txn_.get();
   }
+
+  HQStreamTransportBase* findPushStream(quic::StreamId) override {
+    return nullptr;
+  }
+
+  void findPushStreams(std::unordered_set<HQStreamTransportBase*>& ) override {}
+  bool erasePushStream(quic::StreamId) override { return false; }
+  uint32_t getNumOutgoingStreams() const override{
+    return static_cast<uint32_t>(streams_.size());
+  }
+  uint32_t getNumIncomingStreams() const override{
+    return static_cast<uint32_t>(streams_.size());
+  }
+
+  void onNewPushStream(quic::StreamId /* streamId */,
+                       hq::PushId /* pushId */,
+                       size_t /* to consume */) override {};
 
   const std::chrono::milliseconds transactionTimeout_;
   const proxygen::TransportDirection direction_;

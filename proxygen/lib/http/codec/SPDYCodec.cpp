@@ -1,19 +1,17 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/SPDYCodec.h>
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
 #include <folly/Conv.h>
 #include <folly/Memory.h>
-#include <folly/ScopeGuard.h>
 #include <folly/String.h>
 #include <folly/io/Cursor.h>
 #include <glog/logging.h>
@@ -33,7 +31,6 @@ using folly::io::Cursor;
 using folly::io::RWPrivateCursor;
 using proxygen::compress::Header;
 using proxygen::compress::HeaderPieceList;
-using std::pair;
 using std::string;
 using std::unique_ptr;
 using std::vector;
@@ -602,8 +599,9 @@ unique_ptr<IOBuf> SPDYCodec::serializeRequestHeaders(
 
   CHECK_GT(versionSettings_.majorVersion, 2) << "SPDY/2 no longer supported";
 
+  string pushString;
   if (isPushed) {
-    const string& pushString = msg.getPushStatusStr();
+    pushString = msg.getPushStatusStr();
     allHeaders.emplace_back(HTTP_HEADER_COLON_STATUS, pushString);
   } else {
     allHeaders.emplace_back(HTTP_HEADER_COLON_METHOD, method);
@@ -914,26 +912,27 @@ size_t SPDYCodec::generateGoaway(IOBufQueue& writeBuf,
   return frameSize;
 }
 
-size_t SPDYCodec::generatePingRequest(IOBufQueue& writeBuf) {
+size_t SPDYCodec::generatePingRequest(IOBufQueue& writeBuf,
+                                      folly::Optional<uint64_t> /* data */) {
   const auto id = nextEgressPingID_;
   nextEgressPingID_ += 2;
   VLOG(4) << "Generating ping request with id=" << id;
   return generatePingCommon(writeBuf, id);
 }
 
-size_t SPDYCodec::generatePingReply(IOBufQueue& writeBuf, uint64_t uniqueID) {
-  VLOG(4) << "Generating ping reply with id=" << uniqueID;
-  return generatePingCommon(writeBuf, uniqueID);
+size_t SPDYCodec::generatePingReply(IOBufQueue& writeBuf, uint64_t data) {
+  VLOG(4) << "Generating ping reply with id=" << data;
+  return generatePingCommon(writeBuf, data);
 }
 
-size_t SPDYCodec::generatePingCommon(IOBufQueue& writeBuf, uint64_t uniqueID) {
+size_t SPDYCodec::generatePingCommon(IOBufQueue& writeBuf, uint64_t data) {
   const size_t frameSize = kFrameSizeControlCommon + kFrameSizePing;
   const size_t expectedLength = writeBuf.chainLength() + frameSize;
   QueueAppender appender(&writeBuf, frameSize);
   appender.writeBE(versionSettings_.controlVersion);
   appender.writeBE(uint16_t(spdy::PING));
   appender.writeBE(flagsAndLength(0, kFrameSizePing));
-  appender.writeBE(uint32_t(uniqueID));
+  appender.writeBE(uint32_t(data));
   DCHECK_EQ(writeBuf.chainLength(), expectedLength);
   return frameSize;
 }
@@ -1149,7 +1148,7 @@ SPDYCodec::parseHeaders(TransportDirection direction, StreamID streamID,
           int32_t code = -1;
           try {
             code = folly::to<unsigned int>(codePiece);
-          } catch (const std::range_error& ex) {
+          } catch (const std::range_error&) {
             // Toss out the range error cause the exception will get it
           }
           if (code >= 100 && code <= 999) {
@@ -1174,7 +1173,7 @@ SPDYCodec::parseHeaders(TransportDirection direction, StreamID streamID,
             int16_t code = -1;
             try {
               code = folly::to<uint16_t>(value);
-            } catch (const std::range_error& ex) {
+            } catch (const std::range_error&) {
               // eat the push status
             }
             if (code >= 100 && code <= 999) {
@@ -1390,8 +1389,8 @@ void SPDYCodec::onSettings(const SettingList& settings) {
   callback_->onSettings(settingsList);
 }
 
-void SPDYCodec::onPing(uint32_t uniqueID) noexcept {
-  bool odd = uniqueID & 0x1;
+void SPDYCodec::onPing(uint32_t data) noexcept {
+  bool odd = data & 0x1;
   bool isReply = true;
   if (transportDirection_ == TransportDirection::DOWNSTREAM) {
     if (odd) {
@@ -1402,14 +1401,14 @@ void SPDYCodec::onPing(uint32_t uniqueID) noexcept {
   }
 
   if (isReply) {
-    if (uniqueID >= nextEgressPingID_) {
-      LOG(INFO) << "Received reply for pingID=" << uniqueID
+    if (data >= nextEgressPingID_) {
+      LOG(INFO) << "Received reply for pingID=" << data
                 << " that was never sent";
       return;
     }
-    callback_->onPingReply(uniqueID);
+    callback_->onPingReply(data);
   } else {
-    callback_->onPingRequest(uniqueID);
+    callback_->onPingRequest(data);
   }
 }
 

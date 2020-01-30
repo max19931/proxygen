@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/CodecUtil.h>
 
 #include <folly/ThreadLocal.h>
@@ -79,10 +78,11 @@ bool CodecUtil::hasGzipAndDeflate(const std::string& value, bool& hasGzip,
 }
 
 
-std::vector<compress::Header> CodecUtil::prepareMessageForCompression(
+void CodecUtil::prepareMessageForCompression(
     const HTTPMessage& msg,
-    std::vector<std::string>& temps) {
-  std::vector<compress::Header> allHeaders;
+    std::vector<compress::Header>& allHeaders,
+    std::vector<std::string>& temps,
+    bool addDateToResponse) {
   if (msg.isRequest()) {
     if (msg.isEgressWebsocketUpgrade()) {
       allHeaders.emplace_back(HTTP_HEADER_COLON_METHOD,
@@ -121,11 +121,10 @@ std::vector<compress::Header> CodecUtil::prepareMessageForCompression(
   bool hasDateHeader =
       appendHeaders(msg.getHeaders(), allHeaders, HTTP_HEADER_DATE);
 
-  if (msg.isResponse() && !hasDateHeader) {
+  if (addDateToResponse && msg.isResponse() && !hasDateHeader) {
     temps.emplace_back(HTTPMessage::formatDateHeader());
     allHeaders.emplace_back(HTTP_HEADER_DATE, temps.back());
   }
-  return allHeaders;
 }
 
 bool CodecUtil::appendHeaders(const HTTPHeaders& inputHeaders,

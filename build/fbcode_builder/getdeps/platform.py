@@ -1,9 +1,7 @@
-# Copyright (c) 2019-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
@@ -96,22 +94,3 @@ class HostType(object):
             and self.distro == b.distro
             and self.distrovers == b.distrovers
         )
-
-
-def context_from_host_tuple(host_tuple=None, facebook_internal=False):
-    """ Given an optional host tuple, construct a context appropriate
-    for passing to the boolean expression evaluator so that conditional
-    sections in manifests can be resolved. """
-    if host_tuple is None:
-        host_type = HostType()
-    elif isinstance(host_tuple, HostType):
-        host_type = host_tuple
-    else:
-        host_type = HostType.from_tuple_string(host_tuple)
-
-    return {
-        "os": host_type.ostype,
-        "distro": host_type.distro,
-        "distro_vers": host_type.distrovers,
-        "fb": "on" if facebook_internal else "off",
-    }

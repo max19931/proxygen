@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/test/HTTPParallelCodecTest.h>
 #include <proxygen/lib/http/codec/test/MockHTTPCodec.h>
 #include <folly/io/Cursor.h>
@@ -56,6 +55,24 @@ class HTTP2CodecTest : public HTTPParallelCodecTest {
   }
   void testHeaderListSize(bool oversized);
   void testFrameSizeLimit(bool oversized);
+
+  void writeHeaders(folly::IOBufQueue& writeBuf,
+                    std::unique_ptr<folly::IOBuf> headers,
+                    uint32_t stream,
+                    folly::Optional<http2::PriorityUpdate> priority,
+                    folly::Optional<uint8_t> padding,
+                    bool endStream,
+                    bool endHeaders) {
+    auto headersLen = headers ? headers->computeChainDataLength() : 0;
+    auto headerSize = http2::calculatePreHeaderBlockSize(
+      false, false, priority.hasValue(), padding.hasValue());
+    auto header = writeBuf.preallocate(headerSize, 32);
+    writeBuf.postallocate(headerSize);
+    writeBuf.append(std::move(headers));
+    http2::writeHeaders((uint8_t*)header.first, header.second, writeBuf,
+                        headersLen, stream, priority, padding, endStream,
+                        endHeaders);
+  }
 
  protected:
   HTTP2Codec upstreamCodec_{TransportDirection::UPSTREAM};
@@ -332,13 +349,13 @@ TEST_F(HTTP2CodecTest, BadHeaders) {
     std::vector<proxygen::compress::Header> allHeaders = reqHeaders;
     allHeaders.erase(allHeaders.begin() + i);
     auto encodedHeaders = headerCodec.encode(allHeaders);
-    http2::writeHeaders(output_,
-                        std::move(encodedHeaders),
-                        stream,
-                        folly::none,
-                        http2::kNoPadding,
-                        true,
-                        true);
+    writeHeaders(output_,
+                 std::move(encodedHeaders),
+                 stream,
+                 folly::none,
+                 http2::kNoPadding,
+                 true,
+                 true);
   }
   // dup fields
   std::string v("foomonkey");
@@ -348,13 +365,13 @@ TEST_F(HTTP2CodecTest, BadHeaders) {
     h.value = &v;
     allHeaders.push_back(h);
     auto encodedHeaders = headerCodec.encode(allHeaders);
-    http2::writeHeaders(output_,
-                        std::move(encodedHeaders),
-                        stream,
-                        folly::none,
-                        http2::kNoPadding,
-                        true,
-                        true);
+    writeHeaders(output_,
+                 std::move(encodedHeaders),
+                 stream,
+                 folly::none,
+                 http2::kNoPadding,
+                 true,
+                 true);
   }
 
   parse();
@@ -382,13 +399,13 @@ TEST_F(HTTP2CodecTest, BadPseudoHeaders) {
   HTTPCodec::StreamID stream = 1;
   std::vector<proxygen::compress::Header> allHeaders = reqHeaders;
   auto encodedHeaders = headerCodec.encode(allHeaders);
-  http2::writeHeaders(output_,
-                      std::move(encodedHeaders),
-                      stream,
-                      folly::none,
-                      http2::kNoPadding,
-                      true,
-                      true);
+  writeHeaders(output_,
+               std::move(encodedHeaders),
+               stream,
+               folly::none,
+               http2::kNoPadding,
+               true,
+               true);
 
   parse();
   EXPECT_EQ(callbacks_.messageBegin, 0);
@@ -416,13 +433,13 @@ TEST_F(HTTP2CodecTest, BadHeaderValues) {
     std::vector<proxygen::compress::Header> allHeaders;
     allHeaders.push_back(reqHeaders[i]);
     auto encodedHeaders = headerCodec.encode(allHeaders);
-    http2::writeHeaders(output_,
-                        std::move(encodedHeaders),
-                        stream,
-                        folly::none,
-                        http2::kNoPadding,
-                        true,
-                        true);
+    writeHeaders(output_,
+                 std::move(encodedHeaders),
+                 stream,
+                 folly::none,
+                 http2::kNoPadding,
+                 true,
+                 true);
   }
 
   parse();
@@ -489,13 +506,13 @@ TEST_F(HTTP2CodecTest, BadConnect) {
     auto allHeaders = goodHeaders;
     allHeaders.push_back(badHeaders[i]);
     auto encodedHeaders = headerCodec.encode(allHeaders);
-    http2::writeHeaders(output_,
-                        std::move(encodedHeaders),
-                        stream,
-                        folly::none,
-                        http2::kNoPadding,
-                        true,
-                        true);
+    writeHeaders(output_,
+                 std::move(encodedHeaders),
+                 stream,
+                 folly::none,
+                 http2::kNoPadding,
+                 true,
+                 true);
   }
 
   parse();
@@ -622,13 +639,13 @@ TEST_F(HTTP2CodecTest, BadHeadersReply) {
     std::vector<proxygen::compress::Header> allHeaders = respHeaders;
     allHeaders.erase(allHeaders.begin() + i);
     auto encodedHeaders = headerCodec.encode(allHeaders);
-    http2::writeHeaders(output_,
-                        std::move(encodedHeaders),
-                        stream,
-                        folly::none,
-                        http2::kNoPadding,
-                        true,
-                        true);
+    writeHeaders(output_,
+                 std::move(encodedHeaders),
+                 stream,
+                 folly::none,
+                 http2::kNoPadding,
+                 true,
+                 true);
   }
   // dup fields
   std::string v("foomonkey");
@@ -638,13 +655,13 @@ TEST_F(HTTP2CodecTest, BadHeadersReply) {
     h.value = &v;
     allHeaders.push_back(h);
     auto encodedHeaders = headerCodec.encode(allHeaders);
-    http2::writeHeaders(output_,
-                        std::move(encodedHeaders),
-                        stream,
-                        folly::none,
-                        http2::kNoPadding,
-                        true,
-                        true);
+    writeHeaders(output_,
+                 std::move(encodedHeaders),
+                 stream,
+                 folly::none,
+                 http2::kNoPadding,
+                 true,
+                 true);
   }
 
   parse();
@@ -846,7 +863,7 @@ TEST_F(HTTP2CodecTest, BasicData) {
   EXPECT_EQ(callbacks_.bodyLength, 5);
   EXPECT_EQ(callbacks_.streamErrors, 0);
   EXPECT_EQ(callbacks_.sessionErrors, 0);
-  EXPECT_EQ(callbacks_.data.move()->moveToFbString(), data);
+  EXPECT_EQ(callbacks_.data_.move()->moveToFbString(), data);
 }
 
 TEST_F(HTTP2CodecTest, LongData) {
@@ -865,7 +882,7 @@ TEST_F(HTTP2CodecTest, LongData) {
   EXPECT_EQ(callbacks_.bodyLength, 100);
   EXPECT_EQ(callbacks_.streamErrors, 0);
   EXPECT_EQ(callbacks_.sessionErrors, 0);
-  EXPECT_EQ(callbacks_.data.move()->moveToFbString(), buf->moveToFbString());
+  EXPECT_EQ(callbacks_.data_.move()->moveToFbString(), buf->moveToFbString());
 }
 
 TEST_F(HTTP2CodecTest, MalformedPaddingLength) {
@@ -967,7 +984,7 @@ TEST_F(HTTP2CodecTest, DataFramePartialDataWithNoAppByte) {
   EXPECT_EQ(callbacks_.paddingBytes, padding + 1);
   EXPECT_EQ(callbacks_.streamErrors, 0);
   EXPECT_EQ(callbacks_.sessionErrors, 0);
-  EXPECT_EQ(callbacks_.data.move()->moveToFbString(), buf->moveToFbString());
+  EXPECT_EQ(callbacks_.data_.move()->moveToFbString(), buf->moveToFbString());
 }
 
 TEST_F(HTTP2CodecTest, BasicRst) {
@@ -1057,7 +1074,7 @@ TEST_F(HTTP2CodecTest, BasicGoaway) {
 
   parse();
   EXPECT_EQ(callbacks_.goaways, 1);
-  EXPECT_EQ(callbacks_.data.move()->moveToFbString(), "debugData");
+  EXPECT_EQ(callbacks_.data_.move()->moveToFbString(), "debugData");
   EXPECT_EQ(callbacks_.streamErrors, 0);
   EXPECT_EQ(callbacks_.sessionErrors, 0);
 }
@@ -1124,7 +1141,7 @@ TEST_F(HTTP2CodecTest, DoubleGoawayWithError) {
 
   parseUpstream();
   EXPECT_EQ(callbacks_.goaways, 1);
-  EXPECT_EQ(callbacks_.data.move()->moveToFbString(), "debugData");
+  EXPECT_EQ(callbacks_.data_.move()->moveToFbString(), "debugData");
   EXPECT_EQ(callbacks_.streamErrors, 0);
   EXPECT_EQ(callbacks_.sessionErrors, 0);
 }
@@ -1394,6 +1411,13 @@ TEST_F(HTTP2CodecTest, BadHeaderPriority) {
   EXPECT_EQ(callbacks_.sessionErrors, 0);
 }
 
+TEST_F(HTTP2CodecTest, CircularHeaderPriority) {
+  HTTPMessage req = getGetRequest();
+  req.setHTTP2Priority(HTTPMessage::HTTPPriority(1, false, 7));
+  upstreamCodec_.generateHeader(output_, 1, req, true /* eom */);
+}
+
+
 TEST_F(HTTP2CodecTest, DuplicateBadHeaderPriority) {
   // Sent an initial header with a circular dependency
   HTTPMessage req = getGetRequest();
@@ -1558,7 +1582,7 @@ TEST_F(HTTP2CodecTest, BasicCertificateRequest) {
   parse();
   EXPECT_EQ(callbacks_.certificateRequests, 1);
   EXPECT_EQ(callbacks_.lastCertRequestId, requestId);
-  EXPECT_EQ(callbacks_.data.move()->moveToFbString(), "authRequestData");
+  EXPECT_EQ(callbacks_.data_.move()->moveToFbString(), "authRequestData");
   EXPECT_EQ(callbacks_.streamErrors, 0);
   EXPECT_EQ(callbacks_.sessionErrors, 0);
 }
@@ -1572,7 +1596,7 @@ TEST_F(HTTP2CodecTest, BasicCertificate) {
   parse();
   EXPECT_EQ(callbacks_.certificates, 1);
   EXPECT_EQ(callbacks_.lastCertId, certId);
-  EXPECT_EQ(callbacks_.data.move()->moveToFbString(), "authenticatorData");
+  EXPECT_EQ(callbacks_.data_.move()->moveToFbString(), "authenticatorData");
   EXPECT_EQ(callbacks_.streamErrors, 0);
   EXPECT_EQ(callbacks_.sessionErrors, 0);
 }
@@ -1780,13 +1804,13 @@ TEST_F(HTTP2CodecTest, WebsocketBadHeader) {
     auto headers = reqHeaders;
     headers.push_back(optionalHeaders[i]);
     auto encodedHeaders = headerCodec.encode(headers);
-    http2::writeHeaders(output_,
-                        std::move(encodedHeaders),
-                        stream,
-                        folly::none,
-                        http2::kNoPadding,
-                        false,
-                        true);
+    writeHeaders(output_,
+                 std::move(encodedHeaders),
+                 stream,
+                 folly::none,
+                 http2::kNoPadding,
+                 false,
+                 true);
     parse();
   }
 
@@ -1810,13 +1834,13 @@ TEST_F(HTTP2CodecTest, WebsocketDupProtocol) {
   };
   HPACKCodec headerCodec(TransportDirection::UPSTREAM);
   auto encodedHeaders = headerCodec.encode(headers);
-  http2::writeHeaders(output_,
-                      std::move(encodedHeaders),
-                      1,
-                      folly::none,
-                      http2::kNoPadding,
-                      false,
-                      true);
+  writeHeaders(output_,
+               std::move(encodedHeaders),
+               1,
+               folly::none,
+               http2::kNoPadding,
+               false,
+               true);
   parse();
   EXPECT_EQ(callbacks_.messageBegin, 0);
   EXPECT_EQ(callbacks_.headersComplete, 0);
@@ -1958,13 +1982,13 @@ TEST_F(HTTP2CodecTest, TrailersWithPseudoHeaders) {
   std::vector<proxygen::compress::Header> trailers = {
       Header::makeHeaderForTest(headers::kMethod, post)};
   auto encodedTrailers = headerCodec.encode(trailers);
-  http2::writeHeaders(output_,
-                      std::move(encodedTrailers),
-                      1,
-                      folly::none,
-                      http2::kNoPadding,
-                      true,
-                      true);
+  writeHeaders(output_,
+               std::move(encodedTrailers),
+               1,
+               folly::none,
+               http2::kNoPadding,
+               true,
+               true);
 
   parse();
 
@@ -2118,13 +2142,13 @@ TEST_F(HTTP2CodecTest, TrailersReplyWithPseudoHeaders) {
   std::vector<proxygen::compress::Header> trailers = {
       Header::makeHeaderForTest(headers::kMethod, post)};
   auto encodedTrailers = headerCodec.encode(trailers);
-  http2::writeHeaders(output_,
-                      std::move(encodedTrailers),
-                      1,
-                      folly::none,
-                      http2::kNoPadding,
-                      true,
-                      true);
+  writeHeaders(output_,
+               std::move(encodedTrailers),
+               1,
+               folly::none,
+               http2::kNoPadding,
+               true,
+               true);
   parseUpstream();
 
   EXPECT_EQ(callbacks_.messageBegin, 1);

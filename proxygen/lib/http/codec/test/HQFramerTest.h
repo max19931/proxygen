@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2019-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <folly/io/IOBufQueue.h>
@@ -29,18 +28,6 @@ size_t writeFrameHeaderManual(folly::IOBufQueue& queue,
 // Write a valid frame for each frame type
 void writeValidFrame(folly::IOBufQueue& queue, proxygen::hq::FrameType type) {
   switch (type) {
-    case proxygen::hq::FrameType::PRIORITY:
-      proxygen::hq::writePriority(
-          queue,
-          {
-              proxygen::hq::PriorityElementType::REQUEST_STREAM,
-              proxygen::hq::PriorityElementType::REQUEST_STREAM,
-              true,
-              123,
-              234,
-              30,
-          });
-      break;
     case proxygen::hq::FrameType::SETTINGS:
       proxygen::hq::writeSettings(
           queue,

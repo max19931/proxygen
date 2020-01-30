@@ -1,18 +1,17 @@
 /*
- *  Copyright (c) 2019-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include "proxygen/lib/statistics/ResourceData.h"
 #include <atomic>
 #include <chrono>
-#include <folly/SharedMutex.h>
+#include <folly/ThreadLocal.h>
 #include <folly/experimental/FunctionScheduler.h>
 
 namespace proxygen {
@@ -87,8 +86,12 @@ class ResourceStats {
    * Method is virtual for testing reasons.
    */
   virtual const ResourceData& getCurrentLoadData() const;
+  // Same as above except no local update will be performed, even if newer
+  // data is available.
+  virtual const ResourceData& getPreviousLoadData() const;
+
  protected:
-  virtual void updateCachedData();
+  void updateCachedData();
 
   /**
    * Abstraction that enables callers to provide their own implementations
@@ -97,12 +100,12 @@ class ResourceStats {
   std::unique_ptr<Resources> resources_;
 
   /**
-   * This struct contains both the data fields this class
-   * operates on and controls the refreshing management logic.  The associated
-   * mutex is for synchronization purposes.
+   * data_ represents the source of truth for the various resource fields.
+   * tlData_ is updated on a 'as-used' basis from data via RCU
+   * synchronization.
    */
-  ResourceData data_;
-  mutable folly::SharedMutex dataMutex_;
+  std::atomic<ResourceData*> data_;
+  folly::ThreadLocal<ResourceData> tlData_;
 
   // Refresh management fields
 
@@ -121,6 +124,10 @@ class ResourceStats {
   std::mutex schedulerMutex_;
   std::atomic<std::chrono::milliseconds> refreshPeriodMs_{
       std::chrono::milliseconds(0)};
+
+ private:
+  // Wrapper for updating and retiring old cached data_ via RCU.
+  void modifyData(ResourceData* newData);
 };
 
 } // namespace proxygen

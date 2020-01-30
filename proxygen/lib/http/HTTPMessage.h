@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <array>
@@ -91,13 +90,18 @@ class HTTPMessage {
   void setClientAddress(const folly::SocketAddress& addr,
                         std::string ipStr = empty_string,
                         std::string portStr = empty_string) {
-    request().clientAddress_ = addr;
-    if (ipStr.empty() || portStr.empty()) {
-      request().clientIP_ = addr.getAddressStr();
-      request().clientPort_ = folly::to<std::string>(addr.getPort());
+    auto& req = request();
+    req.clientAddress_ = addr;
+    if (!ipStr.empty() && !portStr.empty()) {
+      req.clientIP_.emplace(std::move(ipStr));
+      req.clientPort_.emplace(std::move(portStr));
     } else {
-      request().clientIP_ = std::move(ipStr);
-      request().clientPort_ = std::move(portStr);
+      if (req.clientIP_) {
+        req.clientIP_->clear();
+      }
+      if (req.clientPort_) {
+        req.clientPort_->clear();
+      }
     }
   }
 
@@ -106,11 +110,28 @@ class HTTPMessage {
   }
 
   const std::string& getClientIP() const {
-    return request().clientIP_;
+    auto& req = request();
+    if (!req.clientIP_ || req.clientIP_->empty()) {
+      if (req.clientAddress_.isInitialized()) {
+        req.clientIP_.emplace(req.clientAddress_.getAddressStr());
+      } else {
+        return empty_string;
+      }
+    }
+    return *req.clientIP_;
   }
 
   const std::string& getClientPort() const {
-    return request().clientPort_;
+    auto& req = request();
+    if (!req.clientPort_ || req.clientPort_->empty()) {
+      if (req.clientAddress_.isInitialized()) {
+        req.clientPort_.emplace(
+          folly::to<std::string>(req.clientAddress_.getPort()));
+      } else {
+        return empty_string;
+      }
+    }
+    return *req.clientPort_;
   }
 
   /**
@@ -120,12 +141,12 @@ class HTTPMessage {
                      std::string addressStr = empty_string,
                      std::string portStr = empty_string) {
     dstAddress_ = addr;
-    if (addressStr.empty() || portStr.empty()) {
-      dstIP_ = addr.getAddressStr();
-      dstPort_ = folly::to<std::string>(addr.getPort());
-    } else {
+    if (!addressStr.empty() && !portStr.empty()) {
       dstIP_ = std::move(addressStr);
       dstPort_ = std::move(portStr);
+    } else {
+      dstIP_.clear();
+      dstPort_.clear();
     }
   }
 
@@ -134,10 +155,16 @@ class HTTPMessage {
   }
 
   const std::string& getDstIP() const {
+    if (dstIP_.empty() && dstAddress_.isInitialized()) {
+      dstIP_ = dstAddress_.getAddressStr();
+    }
     return dstIP_;
   }
 
   const std::string& getDstPort() const {
+    if (dstPort_.empty() && dstAddress_.isInitialized()) {
+      dstPort_ = folly::to<std::string>(dstAddress_.getPort());
+    }
     return dstPort_;
   }
 
@@ -181,22 +208,9 @@ class HTTPMessage {
    */
   template <typename T> // T = string
   ParseURL setURL(T&& url) {
-    VLOG(9) << "setURL: " << url;
-
-    // Set the URL, path, and query string parameters
-    ParseURL u(url);
-    if (u.valid()) {
-      VLOG(9) << "set path: " << u.path() << " query:" << u.query();
-      request().path_ = u.path().str();
-      request().query_ = u.query().str();
-      unparseQueryParams();
-    } else {
-      VLOG(4) << "Error in parsing URL: " << url;
-    }
-
-    request().url_ = std::forward<T>(url);
-    return u;
+    return setURLImpl(std::forward<T>(url), true);
   }
+
   // The template function above doesn't work with char*,
   // so explicitly convert to a string first.
   void setURL(const char* url) {
@@ -211,15 +225,37 @@ class HTTPMessage {
 
   /**
    * Access the path component (fpreq)
+   *
+   * getPath will lazily allocate a string object, which is generally
+   * more expensive.  Prefer getPathAsStringPiece.
    */
   const std::string& getPath() const {
+    auto& req = request();
+    if (!req.pathStr_.hasValue()) {
+      req.pathStr_.emplace(req.path_.data(), req.path_.size());
+    }
+    return *req.pathStr_;
+  }
+
+  folly::StringPiece getPathAsStringPiece() const {
     return request().path_;
   }
 
   /**
    * Access the query component (fpreq)
+   *
+   * getQueryString will lazily allocate a string object, which is generally
+   * more expensive.  Prefer getQueryStringAsStringPiece.
    */
   const std::string& getQueryString() const {
+    auto& req = request();
+    if (!req.queryStr_.hasValue()) {
+      req.queryStr_.emplace(req.query_.data(), req.query_.size());
+    }
+    return *req.queryStr_;
+  }
+
+  folly::StringPiece getQueryStringAsStringPiece() const {
     return request().query_;
   }
 
@@ -391,7 +427,7 @@ class HTTPMessage {
    * Access the push status code
    */
   void setPushStatusCode(const uint16_t status);
-  const std::string& getPushStatusStr() const;
+  std::string getPushStatusStr() const;
   uint16_t getPushStatusCode() const;
 
   /**
@@ -536,7 +572,8 @@ class HTTPMessage {
   void stripPerHopHeaders();
 
   const HTTPHeaders& getStrippedPerHopHeaders() const {
-    return strippedPerHopHeaders_;
+    CHECK(strippedPerHopHeaders_) << "call stripPerHopHeaders first";
+    return *strippedPerHopHeaders_;
   }
 
   void setSecure(bool secure) { secure_ = secure; }
@@ -667,14 +704,14 @@ class HTTPMessage {
    * @returns true if this HTTPMessage represents an HTTP request
    */
   bool isRequest() const {
-    return fields_.which() == 1;
+    return fields_.which_ == MessageType::REQUEST;
   }
 
   /**
    * @returns true if this HTTPMessage represents an HTTP response
    */
   bool isResponse() const {
-    return fields_.which() == 2;
+    return fields_.which_ == MessageType::RESPONSE;
   }
 
   /**
@@ -683,13 +720,13 @@ class HTTPMessage {
    * invoke callback once with each name,value pair.
    */
   static void splitNameValuePieces(
-      const std::string& input,
+      folly::StringPiece input,
       char pairDelim,
       char valueDelim,
       std::function<void(folly::StringPiece, folly::StringPiece)> callback);
 
   static void splitNameValue(
-      const std::string& input,
+      folly::StringPiece input,
       char pairDelim,
       char valueDelim,
       std::function<void(std::string&&, std::string&&)> callback);
@@ -736,6 +773,18 @@ class HTTPMessage {
 
   void parseCookies() const;
 
+  template <typename T> // T = string
+  ParseURL setURLImpl(T&& url, bool unparse) {
+    VLOG(9) << "setURL: " << url;
+
+    // Set the URL, path, and query string parameters
+    request().url_ = std::forward<T>(url);
+    return setURLImplInternal(unparse);
+  }
+
+  ParseURL setURLImplInternal(bool unparse);
+
+  bool setQueryStringImpl(const std::string& queryString, bool unparse);
   void parseQueryParams() const;
   void unparseQueryParams();
 
@@ -756,15 +805,16 @@ class HTTPMessage {
    */
   struct Request {
     folly::SocketAddress clientAddress_;
-    std::string clientIP_;
-    std::string clientPort_;
+    mutable folly::Optional<std::string> clientIP_;
+    mutable folly::Optional<std::string> clientPort_;
     mutable boost::variant<boost::blank, std::string, HTTPMethod> method_;
-    std::string path_;
-    std::string query_;
+    folly::StringPiece path_;
+    folly::StringPiece query_;
+    mutable folly::Optional<std::string> pathStr_;
+    mutable folly::Optional<std::string> queryStr_;
     std::string url_;
 
     uint16_t pushStatus_;
-    std::string pushStatusStr_;
   };
 
   struct Response {
@@ -774,48 +824,129 @@ class HTTPMessage {
   };
 
   folly::SocketAddress dstAddress_;
-  std::string dstIP_;
-  std::string dstPort_;
+  mutable std::string dstIP_;
+  mutable std::string dstPort_;
 
   std::string localIP_;
   std::string versionStr_;
 
-  mutable boost::variant<boost::blank, Request, Response> fields_;
-
-  Request& request() {
-    DCHECK(fields_.which() == 0 || fields_.which() == 1) << fields_.which();
-    if (fields_.which() == 0) {
-      fields_ = Request();
+  enum class MessageType: uint8_t {
+    NONE = 0,
+    REQUEST = 1,
+    RESPONSE = 2
+  };
+  struct Fields {
+    Fields() = default;
+    Fields(const Fields& other) {
+      copyFrom(other);
     }
 
-    return boost::get<Request>(fields_);
+    Fields& operator=(const Fields& other) {
+      clear();
+      copyFrom(other);
+      return *this;
+    }
+
+    ~Fields() {
+      clear();
+    }
+
+    void clear() {
+      switch (which_) {
+        case MessageType::REQUEST:
+          data_.request.~Request();
+          break;
+        case MessageType::RESPONSE:
+          data_.response.~Response();
+          break;
+        case MessageType::NONE:
+          break;
+      }
+      which_ = MessageType::NONE;
+    }
+
+    void copyFrom(const Fields& other) {
+      which_ = other.which_;
+      switch (which_) {
+        case MessageType::REQUEST:
+          new (&data_.request) Request(other.data_.request);
+          break;
+        case MessageType::RESPONSE:
+          new (&data_.response) Response(other.data_.response);
+          break;
+        case MessageType::NONE:
+          break;
+      }
+    }
+
+    Fields(Fields&& other) {
+      moveFrom(std::move(other));
+    }
+
+    Fields& operator=(Fields&& other) {
+      clear();
+      moveFrom(std::move(other));
+      return *this;
+    }
+
+    void moveFrom(Fields&& other) {
+      which_ = other.which_;
+      switch (which_) {
+        case MessageType::REQUEST:
+          new (&data_.request) Request(std::move(other.data_.request));
+          break;
+        case MessageType::RESPONSE:
+          new (&data_.response) Response(
+            std::move(other.data_.response));
+          break;
+        case MessageType::NONE:
+          break;
+      }
+    }
+
+    mutable MessageType which_{MessageType::NONE};
+    mutable union Data {
+      Data() {}
+      ~Data() {}
+      Request request;
+      Response response;
+    } data_;
+  } fields_;
+
+  //mutable boost::variant<boost::blank, Request, Response> fields_;
+
+  Request& request() {
+    DCHECK(fields_.which_ == MessageType::NONE ||
+           fields_.which_ == MessageType::REQUEST)
+      << int(fields_.which_);
+    if (fields_.which_ == MessageType::NONE) {
+      fields_.which_ = MessageType::REQUEST;
+      new (&fields_.data_.request) Request();
+    }
+
+    return fields_.data_.request;
   }
 
   const Request& request() const {
-    DCHECK(fields_.which() == 0 || fields_.which() == 1) << fields_.which();
-    if (fields_.which() == 0) {
-      fields_ = Request();
-    }
-
-    return boost::get<const Request>(fields_);
+    auto msg = const_cast<HTTPMessage*>(this);
+    return msg->request();
   }
 
   Response& response() {
-    DCHECK(fields_.which() == 0 || fields_.which() == 2) << fields_.which();
-    if (fields_.which() == 0) {
-      fields_ = Response();
+    DCHECK(fields_.which_ == MessageType::NONE ||
+           fields_.which_ == MessageType::RESPONSE)
+      << int(fields_.which_);
+    if (fields_.which_ == MessageType::NONE) {
+      fields_.which_ = MessageType::RESPONSE;
+      new (&fields_.data_.response) Response();
     }
 
-    return boost::get<Response>(fields_);
+    return fields_.data_.response;
   }
 
   const Response& response() const {
-    DCHECK(fields_.which() == 0 || fields_.which() == 2) << fields_.which();
-    if (fields_.which() == 0) {
-      fields_ = Response();
-    }
-
-    return boost::get<const Response>(fields_);
+    auto msg = const_cast<HTTPMessage*>(this);
+    return msg->response();
   }
 
   /*
@@ -829,7 +960,7 @@ class HTTPMessage {
 
   std::pair<uint8_t, uint8_t> version_;
   HTTPHeaders headers_;
-  HTTPHeaders strippedPerHopHeaders_;
+  std::unique_ptr<HTTPHeaders> strippedPerHopHeaders_;
   HTTPHeaderSize size_;
   std::unique_ptr<HTTPHeaders> trailers_;
 
@@ -870,7 +1001,7 @@ std::ostream& operator<<(std::ostream& os, const HTTPMessage& msg);
 template<typename Str>
 std::string stripCntrlChars(const Str& str) {
   std::string res;
-  res.reserve(str.length());
+  res.reserve(str.size());
   for (size_t i = 0; i < str.size(); ++i) {
     if (!(str[i] <= 0x1F || str[i] == 0x7F)) {
       res += str[i];

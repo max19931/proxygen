@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <proxygen/httpserver/RequestHandler.h>
@@ -27,17 +26,19 @@ class DirectResponseHandler : public RequestHandler {
         body_(folly::IOBuf::copyBuffer(body)) {
   }
 
-  void onRequest(std::unique_ptr<HTTPMessage> /*headers*/) noexcept override {}
+  void onRequest(std::unique_ptr<HTTPMessage> /*headers*/) noexcept override {
+    ResponseBuilder(downstream_)
+        .status(code_, std::move(message_))
+        .body(std::move(body_))
+        .send();
+  }
 
   void onBody(std::unique_ptr<folly::IOBuf> /*body*/) noexcept override {}
 
   void onUpgrade(proxygen::UpgradeProtocol /*prot*/) noexcept override {}
 
   void onEOM() noexcept override {
-    ResponseBuilder(downstream_)
-        .status(code_, std::move(message_))
-        .body(std::move(body_))
-        .sendWithEOM();
+    ResponseBuilder(downstream_).sendWithEOM();
   }
 
   void requestComplete() noexcept override {

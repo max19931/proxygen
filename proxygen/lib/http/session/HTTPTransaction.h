@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <climits>
@@ -15,6 +14,7 @@
 #include <folly/io/async/AsyncTransport.h>
 #include <folly/io/async/DelayedDestructionBase.h>
 #include <folly/io/async/HHWheelTimer.h>
+#include <folly/lang/Assume.h>
 #include <iosfwd>
 #include <proxygen/lib/http/HTTPConstants.h>
 #include <proxygen/lib/http/HTTPHeaderSize.h>
@@ -22,6 +22,7 @@
 #include <proxygen/lib/http/ProxygenErrorEnum.h>
 #include <proxygen/lib/http/Window.h>
 #include <proxygen/lib/http/codec/HTTPCodec.h>
+#include <proxygen/lib/http/session/ByteEvents.h>
 #include <proxygen/lib/http/session/HTTP2PriorityQueue.h>
 #include <proxygen/lib/http/session/HTTPEvent.h>
 #include <proxygen/lib/http/session/HTTPTransactionEgressSM.h>
@@ -275,7 +276,7 @@ class HTTPTransactionHandler {
    * buffer.
    */
   virtual void onBodyPeek(uint64_t /* offset */,
-                          const folly::IOBufQueue& /* chain */) noexcept {
+                          const folly::IOBuf& /* chain */) noexcept {
   }
 
   /**
@@ -349,22 +350,19 @@ class HTTPTransactionTransportCallback {
 
   virtual void lastByteFlushed() noexcept = 0;
 
-  virtual void firstByteTX() noexcept {
-  }
-
-  virtual void lastByteTX() noexcept {
-  }
-
   virtual void trackedByteFlushed() noexcept {
   }
 
-  virtual void firstByteOffset(const uint64_t /* byteOffset */) noexcept {
-  }
-
-  virtual void lastByteOffset(const uint64_t /* byteOffset */) noexcept {
-  }
-
   virtual void lastByteAcked(std::chrono::milliseconds latency) noexcept = 0;
+
+  virtual void trackedByteEventTX(const ByteEvent& /* event */) noexcept {
+  }
+
+  virtual void trackedByteEventAck(const ByteEvent& /* event */) noexcept {
+  }
+
+  virtual void egressBufferEmpty() noexcept {
+  }
 
   virtual void headerBytesGenerated(HTTPHeaderSize& size) noexcept = 0;
 
@@ -397,10 +395,19 @@ class HTTPTransaction
   using PeekCallback =
       const folly::Function<void(HTTPCodec::StreamID streamId,
                                  uint64_t /* bodyOffset */,
-                                 const folly::IOBufQueue& /* chain */) const>&;
+                                 const folly::IOBuf& /* chain */) const>&;
+  struct FlowControlInfo {
+    bool flowControlEnabled_{false};
+    int64_t sessionSendWindow_{-1};
+    int64_t sessionRecvWindow_{-1};
+    int64_t streamSendWindow_{-1};
+    int64_t streamRecvWindow_{-1};
+  };
 
   class Transport {
    public:
+   enum class Type : uint8_t { TCP, QUIC };
+
     virtual ~Transport() {
     }
 
@@ -456,6 +463,11 @@ class HTTPTransaction
 
     virtual bool getCurrentTransportInfo(wangle::TransportInfo* tinfo) = 0;
 
+    virtual void getFlowControlInfo(FlowControlInfo* info) = 0;
+
+    virtual HTTPTransaction::Transport::Type getSessionType() const
+        noexcept = 0;
+
     virtual const HTTPCodec& getCodec() const noexcept = 0;
 
     /*
@@ -468,8 +480,9 @@ class HTTPTransaction
     virtual bool isDraining() const = 0;
 
     virtual HTTPTransaction* newPushedTransaction(
-        HTTPCodec::StreamID assocStreamId,
-        HTTPTransaction::PushHandler* handler) noexcept = 0;
+                           HTTPCodec::StreamID assocStreamId,
+                           HTTPTransaction::PushHandler* handler,
+                           ProxygenError* error = nullptr) noexcept = 0;
 
     virtual HTTPTransaction* newExTransaction(HTTPTransaction::Handler* handler,
                                               HTTPCodec::StreamID controlStream,
@@ -499,16 +512,21 @@ class HTTPTransaction
     virtual folly::Optional<const HTTPMessage::HTTPPriority> getHTTPPriority(
         uint8_t level) = 0;
 
+    virtual void setRttMeasurementEnabled(bool enabled) = 0;
+    virtual bool isRttMeasurementEnabled() const = 0;
+    virtual folly::Optional<std::chrono::milliseconds> getMeasuredSrtt() const = 0;
+    virtual void measureRttWithPing() = 0;
+
     virtual folly::Expected<folly::Unit, ErrorCode> peek(
         PeekCallback /* peekCallback */) {
       LOG(FATAL) << __func__ << " not supported";
-      __builtin_unreachable();
+      folly::assume_unreachable();
     }
 
     virtual folly::Expected<folly::Unit, ErrorCode> consume(
         size_t /* amount */) {
       LOG(FATAL) << __func__ << " not supported";
-      __builtin_unreachable();
+      folly::assume_unreachable();
     }
 
     /**
@@ -517,7 +535,7 @@ class HTTPTransaction
     virtual folly::Expected<folly::Optional<uint64_t>, ErrorCode> skipBodyTo(
         HTTPTransaction* /* txn */, uint64_t /* nextBodyOffset */) {
       LOG(FATAL) << __func__ << " not supported";
-      __builtin_unreachable();
+      folly::assume_unreachable();
     }
 
     /**
@@ -526,16 +544,15 @@ class HTTPTransaction
     virtual folly::Expected<folly::Optional<uint64_t>, ErrorCode> rejectBodyTo(
         HTTPTransaction* /* txn */, uint64_t /* nextBodyOffset */) {
       LOG(FATAL) << __func__ << " not supported";
-      __builtin_unreachable();
+      folly::assume_unreachable();
     }
 
     /**
      * Ask transport to track and ack body delivery.
      */
-    virtual folly::Expected<folly::Unit, ErrorCode> trackEgressBodyDelivery(
-        uint64_t /* bodyOffset */) {
+    virtual void trackEgressBodyDelivery(uint64_t /* bodyOffset */) {
       LOG(FATAL) << __func__ << " not supported";
-      __builtin_unreachable();
+      folly::assume_unreachable();
     }
   };
 
@@ -655,6 +672,12 @@ class HTTPTransaction
 
   void getCurrentTransportInfo(wangle::TransportInfo* tinfo) const {
     transport_.getCurrentTransportInfo(tinfo);
+  }
+
+  void getCurrentFlowControlInfo(FlowControlInfo* info) const {
+    transport_.getFlowControlInfo(info);
+    info->streamSendWindow_ = sendWindow_.getCapacity();
+    info->streamRecvWindow_ = recvWindow_.getCapacity();
   }
 
   HTTPSessionStats* getSessionStats() const {
@@ -800,24 +823,12 @@ class HTTPTransaction
   /**
    * Invoked by the session when the first byte is flushed.
    */
-  void onEgressBodyFirstByte(
-      const folly::Optional<uint64_t>& maybeByteOffset = folly::none);
+  void onEgressBodyFirstByte();
 
   /**
    * Invoked by the session when the last byte is flushed.
    */
-  void onEgressBodyLastByte(
-      const folly::Optional<uint64_t>& maybeByteOffset = folly::none);
-
-  /**
-   * Invoked by the session when the first byte is transmitted by NIC.
-   */
-  void onEgressBodyFirstByteTX();
-
-  /**
-   * Invoked by the session when the last byte is transmitted by NIC.
-   */
-  void onEgressBodyLastByteTX();
+  void onEgressBodyLastByte();
 
   /**
    * Invoked by the session when the tracked byte is flushed.
@@ -851,10 +862,22 @@ class HTTPTransaction
   void onEgressBodyDeliveryCanceled(uint64_t bodyOffset);
 
   /**
+   * Invoked by the session when a tracked ByteEvent is transmitted by NIC.
+   */
+  void onEgressTrackedByteEventTX(const ByteEvent& event);
+
+  /**
+   * Invoked by the session when a tracked ByteEvent is ACKed by remote peer.
+   *
+   * LAST_BYTE events are processed by legacy functions.
+   */
+  void onEgressTrackedByteEventAck(const ByteEvent& event);
+
+  /**
    * Invoked by the session when data to peek into is available on trasport
    * layer.
    */
-  void onIngressBodyPeek(uint64_t bodyOffset, const folly::IOBufQueue& chain);
+  void onIngressBodyPeek(uint64_t bodyOffset, const folly::IOBuf& chain);
 
   /**
    * Invoked by the session when transaction receives a skip from the peer.
@@ -1151,16 +1174,19 @@ class HTTPTransaction
    * transaction is impossible right now.
    */
   virtual HTTPTransaction* newPushedTransaction(
-      HTTPPushTransactionHandler* handler) {
+      HTTPPushTransactionHandler* handler,
+      ProxygenError* error = nullptr) {
     // Pushed transactions do support partially reliable mode, however push
     // promises should be only generated on a fully reliable transaction.
     CHECK(!partiallyReliable_)
         << __func__
         << ": push promises not supported in partially reliable mode.";
     if (isEgressEOMSeen()) {
+      SET_PROXYGEN_ERROR_IF(error,
+        ProxygenError::kErrorEgressEOMSeenOnParentStream);
       return nullptr;
     }
-    auto txn = transport_.newPushedTransaction(id_, handler);
+    auto txn = transport_.newPushedTransaction(id_, handler, error);
     if (txn) {
       pushedTransactions_.insert(txn->getID());
     }
@@ -1324,10 +1350,14 @@ class HTTPTransaction
     return ret;
   }
 
-  bool testAndClearActive() {
-    bool ret = inActiveSet_;
-    inActiveSet_ = false;
+  bool testAndClearIsCountedTowardsStreamLimit() {
+    bool ret = isCountedTowardsStreamLimit_;
+    isCountedTowardsStreamLimit_ = false;
     return ret;
+  }
+
+  void setIsCountedTowardsStreamLimit() {
+    isCountedTowardsStreamLimit_ = true;
   }
 
   /**
@@ -1412,6 +1442,7 @@ class HTTPTransaction
   void updateRelativeWeight(double ratio);
   void updateSessionBytesSheduled(uint64_t bytes);
   void updateTransactionBytesSent(uint64_t bytes);
+  void checkIfEgressRateLimitedByUpstream();
 
   struct PrioritySampleSummary {
     struct WeightedAverage {
@@ -1432,29 +1463,34 @@ class HTTPTransaction
     return deferredEgressBody_.chainLength() > 0;
   }
 
+  size_t getOutstandingEgressBodyBytes() const {
+    return deferredEgressBody_.chainLength();
+  }
+
   void setLastByteFlushedTrackingEnabled(bool enabled) {
     enableLastByteFlushedTracking_ = enabled;
   }
 
-  folly::Expected<folly::Unit, ErrorCode>
-  setBodyLastByteDeliveryTrackingEnabled(bool enabled) {
-    if (!partiallyReliable_) {
-      return folly::makeUnexpected(ErrorCode::PROTOCOL_ERROR);
+  bool setBodyLastByteDeliveryTrackingEnabled(bool enabled) {
+    if (transport_.getSessionType() != Transport::Type::QUIC) {
+      return false;
     }
+
     enableBodyLastByteDeliveryTracking_ = enabled;
-    return folly::unit;
+    return true;
   }
 
-  /**
-   * Allows the caller to peek into underlying transport's read buffer.
-   * This, together with consume(), forms a scatter/gather API.
-   *
-   * @param peekCallback  A callback that will be executed on each contiguous
-   *                      byte range in transport's read buffer. Number of byte
-   *                      ranges is determined by the number of gaps in the
-   *                      read buffer.
-   */
-  folly::Expected<folly::Unit, ErrorCode> peek(PeekCallback peekCallback);
+/**
+ * Allows the caller to peek into underlying transport's read buffer.
+ * This, together with consume(), forms a scatter/gather API.
+ *
+ * @param peekCallback  A callback that will be executed on each contiguous
+ *                      byte range in transport's read buffer. Number of byte
+ *                      ranges is determined by the number of gaps in the
+ *                      read buffer.
+ */
+folly::Expected<folly::Unit, ErrorCode>
+peek(PeekCallback peekCallback);
 
   /**
    * Allows the caller to consume bytes from the beginning of the read buffer in
@@ -1763,7 +1799,7 @@ class HTTPTransaction
   bool firstByteSent_ : 1;
   bool firstHeaderByteSent_ : 1;
   bool inResume_ : 1;
-  bool inActiveSet_ : 1;
+  bool isCountedTowardsStreamLimit_ : 1;
   bool ingressErrorSeen_ : 1;
   bool priorityFallback_ : 1;
   bool headRequest_ : 1;

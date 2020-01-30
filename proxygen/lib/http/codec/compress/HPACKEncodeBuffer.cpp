@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2015-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #include <proxygen/lib/http/codec/compress/HPACKEncodeBuffer.h>
 
 #include <memory>
@@ -15,7 +14,6 @@
 #include <proxygen/lib/utils/Logging.h>
 
 using folly::IOBuf;
-using proxygen::huffman::HuffTree;
 using std::string;
 using std::unique_ptr;
 
@@ -37,11 +35,11 @@ HPACKEncodeBuffer::HPACKEncodeBuffer(uint32_t growthSize) :
 
 void HPACKEncodeBuffer::addHeadroom(uint32_t headroom) {
   // we expect that this function is called before any encoding happens
-  CHECK(bufQueue_.front() == nullptr);
+  CHECK(bufQueuePtr_->front() == nullptr);
   // create a custom IOBuf and add it to the queue
   unique_ptr<IOBuf> buf = IOBuf::create(std::max(headroom, growthSize_));
   buf->advance(headroom);
-  bufQueue_.append(std::move(buf));
+  bufQueuePtr_->append(std::move(buf));
 }
 
 void HPACKEncodeBuffer::append(uint8_t byte) {
@@ -139,7 +137,7 @@ uint32_t HPACKEncodeBuffer::encodeLiteral(uint8_t instruction, uint8_t nbit,
 }
 
 string HPACKEncodeBuffer::toBin() {
-  return IOBufPrinter::printBin(bufQueue_.front());
+  return IOBufPrinter::printBin(bufQueuePtr_->front());
 }
 
 }

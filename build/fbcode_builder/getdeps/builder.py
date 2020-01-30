@@ -1,14 +1,10 @@
-#!/usr/bin/env python
-# Copyright (c) 2019-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree. An additional grant
-# of patent rights can be found in the PATENTS file in the same directory.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-import glob
 import json
 import os
 import shutil
@@ -40,6 +36,17 @@ class BuilderBase(object):
         self.build_opts = build_opts
         self.manifest = manifest
 
+    def _get_cmd_prefix(self):
+        if self.build_opts.is_windows():
+            vcvarsall = self.build_opts.get_vcvars_path()
+            if vcvarsall is not None:
+                # Since it sets rather a large number of variables we mildly abuse
+                # the cmd quoting rules to assemble a command that calls the script
+                # to prep the environment and then triggers the actual command that
+                # we wanted to run.
+                return [vcvarsall, "amd64", "&&"]
+        return []
+
     def _run_cmd(self, cmd, cwd=None, env=None):
         if env:
             e = self.env.copy()
@@ -48,16 +55,12 @@ class BuilderBase(object):
         else:
             env = self.env
 
-        if self.build_opts.is_windows():
-            vcvarsall = self.build_opts.get_vcvars_path()
-            if vcvarsall is not None:
-                # Since it sets rather a large number of variables we mildly abuse
-                # the cmd quoting rules to assemble a command that calls the script
-                # to prep the environment and then triggers the actual command that
-                # we wanted to run.
-                cmd = [vcvarsall, "amd64", "&&"] + cmd
+        cmd_prefix = self._get_cmd_prefix()
+        if cmd_prefix:
+            cmd = cmd_prefix + cmd
 
-        run_cmd(cmd=cmd, env=env, cwd=cwd or self.build_dir)
+        log_file = os.path.join(self.build_dir, "getdeps_build.log")
+        run_cmd(cmd=cmd, env=env, cwd=cwd or self.build_dir, log_file=log_file)
 
     def build(self, install_dirs, reconfigure):
         print("Building %s..." % self.manifest.name)
@@ -69,7 +72,7 @@ class BuilderBase(object):
 
         self._build(install_dirs=install_dirs, reconfigure=reconfigure)
 
-    def run_tests(self, install_dirs, schedule_type):
+    def run_tests(self, install_dirs, schedule_type, owner):
         """ Execute any tests that we know how to run.  If they fail,
         raise an exception. """
         pass
@@ -97,11 +100,19 @@ class MakeBuilder(BuilderBase):
         self.args = args or []
 
     def _build(self, install_dirs, reconfigure):
-        cmd = ["make", "-j%s" % self.build_opts.num_jobs] + self.args
-        self._run_cmd(cmd)
+        env = self._compute_env(install_dirs)
 
-        install_cmd = ["make", "install", "PREFIX=" + self.inst_dir]
-        self._run_cmd(install_cmd)
+        # Need to ensure that PREFIX is set prior to install because
+        # libbpf uses it when generating its pkg-config file
+        cmd = (
+            ["make", "-j%s" % self.build_opts.num_jobs]
+            + self.args
+            + ["PREFIX=" + self.inst_dir]
+        )
+        self._run_cmd(cmd, env=env)
+
+        install_cmd = ["make", "install"] + self.args + ["PREFIX=" + self.inst_dir]
+        self._run_cmd(install_cmd, env=env)
 
 
 class AutoconfBuilder(BuilderBase):
@@ -115,11 +126,7 @@ class AutoconfBuilder(BuilderBase):
         configure_path = os.path.join(self.src_dir, "configure")
         autogen_path = os.path.join(self.src_dir, "autogen.sh")
 
-        env = self.env.copy()
-        for d in install_dirs:
-            add_path_entry(env, "PKG_CONFIG_PATH", "%s/lib/pkgconfig" % d)
-            bindir = os.path.join(d, "bin")
-            add_path_entry(env, "PATH", bindir, append=False)
+        env = self._compute_env(install_dirs)
 
         if not os.path.exists(configure_path):
             print("%s doesn't exist, so reconfiguring" % configure_path)
@@ -187,6 +194,97 @@ class Iproute2Builder(BuilderBase):
 
 
 class CMakeBuilder(BuilderBase):
+    MANUAL_BUILD_SCRIPT = """\
+#!{sys.executable}
+
+from __future__ import absolute_import, division, print_function, unicode_literals
+
+import argparse
+import subprocess
+import sys
+
+CMAKE = {cmake!r}
+CTEST = {ctest!r}
+SRC_DIR = {src_dir!r}
+BUILD_DIR = {build_dir!r}
+INSTALL_DIR = {install_dir!r}
+CMD_PREFIX = {cmd_prefix!r}
+CMAKE_ENV = {env_str}
+CMAKE_DEFINE_ARGS = {define_args_str}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+      "cmake_args",
+      nargs=argparse.REMAINDER,
+      help='Any extra arguments after an "--" argument will be passed '
+      "directly to CMake."
+    )
+    ap.add_argument(
+      "--mode",
+      choices=["configure", "build", "install", "test"],
+      default="configure",
+      help="The mode to run: configure, build, or install.  "
+      "Defaults to configure",
+    )
+    ap.add_argument(
+      "--build",
+      action="store_const",
+      const="build",
+      dest="mode",
+      help="An alias for --mode=build",
+    )
+    ap.add_argument(
+      "--install",
+      action="store_const",
+      const="install",
+      dest="mode",
+      help="An alias for --mode=install",
+    )
+    ap.add_argument(
+      "--test",
+      action="store_const",
+      const="test",
+      dest="mode",
+      help="An alias for --mode=test",
+    )
+    args = ap.parse_args()
+
+    # Strip off a leading "--" from the additional CMake arguments
+    if args.cmake_args and args.cmake_args[0] == "--":
+        args.cmake_args = args.cmake_args[1:]
+
+    env = CMAKE_ENV
+
+    if args.mode == "configure":
+        full_cmd = CMD_PREFIX + [CMAKE, SRC_DIR] + CMAKE_DEFINE_ARGS + args.cmake_args
+    elif args.mode in ("build", "install"):
+        target = "all" if args.mode == "build" else "install"
+        full_cmd = CMD_PREFIX + [
+                CMAKE,
+                "--build",
+                BUILD_DIR,
+                "--target",
+                target,
+                "--config",
+                "Release",
+        ] + args.cmake_args
+    elif args.mode == "test":
+        full_cmd = CMD_PREFIX + [CTEST] + args.cmake_args
+    else:
+        ap.error("unknown invocation mode: %s" % (args.mode,))
+
+    cmd_str = " ".join(full_cmd)
+    print("Running: %r" % (cmd_str,))
+    proc = subprocess.run(full_cmd, env=env, cwd=BUILD_DIR)
+    sys.exit(proc.returncode)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
     def __init__(
         self, build_opts, ctx, manifest, src_dir, build_dir, inst_dir, defines
     ):
@@ -210,9 +308,34 @@ class CMakeBuilder(BuilderBase):
                 return True
         return False
 
-    def _build(self, install_dirs, reconfigure):
-        reconfigure = reconfigure or self._needs_reconfigure()
+    def _write_build_script(self, **kwargs):
+        env_lines = ["    {!r}: {!r},".format(k, v) for k, v in kwargs["env"].items()]
+        kwargs["env_str"] = "\n".join(["{"] + env_lines + ["}"])
 
+        define_arg_lines = ["["]
+        for arg in kwargs["define_args"]:
+            # Replace the CMAKE_INSTALL_PREFIX argument to use the INSTALL_DIR
+            # variable that we define in the MANUAL_BUILD_SCRIPT code.
+            if arg.startswith("-DCMAKE_INSTALL_PREFIX="):
+                value = "    {!r}.format(INSTALL_DIR),".format(
+                    "-DCMAKE_INSTALL_PREFIX={}"
+                )
+            else:
+                value = "    {!r},".format(arg)
+            define_arg_lines.append(value)
+        define_arg_lines.append("]")
+        kwargs["define_args_str"] = "\n".join(define_arg_lines)
+
+        # In order to make it easier for developers to manually run builds for
+        # CMake-based projects, write out some build scripts that can be used to invoke
+        # CMake manually.
+        build_script_path = os.path.join(self.build_dir, "run_cmake.py")
+        script_contents = self.MANUAL_BUILD_SCRIPT.format(**kwargs)
+        with open(build_script_path, "w") as f:
+            f.write(script_contents)
+        os.chmod(build_script_path, 0o755)
+
+    def _compute_cmake_define_args(self, env):
         defines = {
             "CMAKE_INSTALL_PREFIX": self.inst_dir,
             "BUILD_SHARED_LIBS": "OFF",
@@ -222,7 +345,6 @@ class CMakeBuilder(BuilderBase):
             # medium.
             "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         }
-        env = self._compute_env(install_dirs)
         if "SANDCASTLE" not in os.environ:
             # We sometimes see intermittent ccache related breakages on some
             # of the FB internal CI hosts, so we prefer to disable ccache
@@ -230,6 +352,16 @@ class CMakeBuilder(BuilderBase):
             ccache = path_search(env, "ccache")
             if ccache:
                 defines["CMAKE_CXX_COMPILER_LAUNCHER"] = ccache
+
+        if "GITHUB_ACTIONS" in os.environ and self.build_opts.is_windows():
+            # GitHub actions: the host has both gcc and msvc installed, and
+            # the default behavior of cmake is to prefer gcc.
+            # Instruct cmake that we want it to use cl.exe; this is important
+            # because Boost prefers cl.exe and the mismatch results in cmake
+            # with gcc not being able to find boost built with cl.exe.
+            defines["CMAKE_C_COMPILER"] = "cl.exe"
+            defines["CMAKE_CXX_COMPILER"] = "cl.exe"
+
         if self.build_opts.is_darwin():
             # Try to persuade cmake to set the rpath to match the lib
             # dirs of the dependencies.  This isn't automatic, and to
@@ -255,12 +387,32 @@ class CMakeBuilder(BuilderBase):
         #    define_args += ["-G", "Visual Studio 15 2017 Win64"]
         define_args += ["-G", "Ninja"]
 
+        return define_args
+
+    def _build(self, install_dirs, reconfigure):
+        reconfigure = reconfigure or self._needs_reconfigure()
+
+        env = self._compute_env(install_dirs)
+
         # Resolve the cmake that we installed
         cmake = path_search(env, "cmake")
         if cmake is None:
             raise Exception("Failed to find CMake")
 
         if reconfigure:
+            define_args = self._compute_cmake_define_args(env)
+            self._write_build_script(
+                cmd_prefix=self._get_cmd_prefix(),
+                cmake=cmake,
+                ctest=path_search(env, "ctest"),
+                env=env,
+                define_args=define_args,
+                src_dir=self.src_dir,
+                build_dir=self.build_dir,
+                install_dir=self.inst_dir,
+                sys=sys,
+            )
+
             self._invalidate_cache()
             self._run_cmd([cmake, self.src_dir] + define_args, env=env)
 
@@ -279,7 +431,7 @@ class CMakeBuilder(BuilderBase):
             env=env,
         )
 
-    def run_tests(self, install_dirs, schedule_type):
+    def run_tests(self, install_dirs, schedule_type, owner):
         env = self._compute_env(install_dirs)
         ctest = path_search(env, "ctest")
         cmake = path_search(env, "cmake")
@@ -336,6 +488,7 @@ class CMakeBuilder(BuilderBase):
 
             env.set("http_proxy", "")
             env.set("https_proxy", "")
+            machine_suffix = self.build_opts.host_type.as_tuple_string()
 
             runs = []
 
@@ -349,7 +502,16 @@ class CMakeBuilder(BuilderBase):
                 self.build_opts.fbsource_dir,
                 "--buck-test-info",
                 buck_test_info_name,
+                "--retry=3",
+                "-j=%s" % str(self.build_opts.num_jobs),
+                "--test-config",
+                "platform=%s" % machine_suffix,
+                "buildsystem=getdeps",
+                "--print-long-results",
             ]
+
+            if owner:
+                testpilot_args += ["--contacts", owner]
 
             if schedule_type == "continuous":
                 runs.append(
@@ -467,7 +629,9 @@ class OpenSSLBuilder(BuilderBase):
 
 
 class Boost(BuilderBase):
-    def __init__(self, build_opts, ctx, manifest, src_dir, build_dir, inst_dir):
+    def __init__(
+        self, build_opts, ctx, manifest, src_dir, build_dir, inst_dir, b2_args
+    ):
         children = os.listdir(src_dir)
         assert len(children) == 1, "expected a single directory entry: %r" % (children,)
         boost_src = children[0]
@@ -476,6 +640,7 @@ class Boost(BuilderBase):
         super(Boost, self).__init__(
             build_opts, ctx, manifest, src_dir, build_dir, inst_dir
         )
+        self.b2_args = b2_args
 
     def _build(self, install_dirs, reconfigure):
         linkage = ["static"]
@@ -502,6 +667,7 @@ class Boost(BuilderBase):
                     "--builddir=%s" % self.build_dir,
                 ]
                 + args
+                + self.b2_args
                 + [
                     "link=%s" % link,
                     "runtime-link=shared",
@@ -556,6 +722,26 @@ class NopBuilder(BuilderBase):
         else:
             if not os.path.exists(self.inst_dir):
                 shutil.copytree(self.src_dir, self.inst_dir)
+
+
+class OpenNSABuilder(NopBuilder):
+    # OpenNSA libraries are stored with git LFS. As a result, fetcher fetches
+    # LFS pointers and not the contents. Use git-lfs to pull the real contents
+    # before copying to install dir using NoopBuilder.
+    # In future, if more builders require git-lfs, we would consider installing
+    # git-lfs as part of the sandcastle infra as against repeating similar
+    # logic for each builder that requires git-lfs.
+    def __init__(self, build_opts, ctx, manifest, src_dir, inst_dir):
+        super(OpenNSABuilder, self).__init__(
+            build_opts, ctx, manifest, src_dir, inst_dir
+        )
+
+    def build(self, install_dirs, reconfigure):
+        env = self._compute_env(install_dirs)
+        self._run_cmd(["git", "lfs", "install", "--local"], cwd=self.src_dir, env=env)
+        self._run_cmd(["git", "lfs", "pull"], cwd=self.src_dir, env=env)
+
+        super(OpenNSABuilder, self).build(install_dirs, reconfigure)
 
 
 class SqliteBuilder(BuilderBase):
@@ -623,3 +809,234 @@ install(FILES sqlite3.h sqlite3ext.h DESTINATION include)
             ],
             env=env,
         )
+
+
+class CargoBuilder(BuilderBase):
+    def __init__(
+        self, build_opts, ctx, manifest, src_dir, build_dir, inst_dir, build_doc, loader
+    ):
+        super(CargoBuilder, self).__init__(
+            build_opts, ctx, manifest, src_dir, build_dir, inst_dir
+        )
+        self.build_doc = build_doc
+        self.loader = loader
+
+    def run_cargo(self, install_dirs, operation, args=None):
+        args = args or []
+        env = self._compute_env(install_dirs)
+        # Enable using nightly features with stable compiler
+        env["RUSTC_BOOTSTRAP"] = "1"
+        cmd = [
+            "cargo",
+            operation,
+            "--workspace",
+            "-j%s" % self.build_opts.num_jobs,
+        ] + args
+        self._run_cmd(cmd, cwd=self.build_source_dir(), env=env)
+
+    def build_source_dir(self):
+        return os.path.join(self.build_dir, "source")
+
+    def recreate_dir(self, src, dst):
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+
+    def _build(self, install_dirs, reconfigure):
+        build_source_dir = self.build_source_dir()
+        self.recreate_dir(self.src_dir, build_source_dir)
+
+        dot_cargo_dir = os.path.join(build_source_dir, ".cargo")
+        if not os.path.isdir(dot_cargo_dir):
+            os.mkdir(dot_cargo_dir)
+
+        with open(os.path.join(dot_cargo_dir, "config"), "w+") as f:
+            f.write(
+                """\
+[build]
+target-dir = '''{}'''
+[net]
+git-fetch-with-cli = true
+""".format(
+                    self.build_dir.replace("\\", "\\\\")
+                )
+            )
+
+        self._patchup_workspace(build_source_dir)
+
+        try:
+            from getdeps.facebook.lfs import crates_io_download
+
+            crates_io_download(self.build_opts, self.build_dir, build_source_dir)
+        except ImportError:
+            # This FB internal module isn't shippped to github,
+            # so just rely on cargo downloading crates on it's own
+            pass
+
+        self.run_cargo(install_dirs, "build")
+        self.recreate_dir(build_source_dir, os.path.join(self.inst_dir, "source"))
+
+    def run_tests(self, install_dirs, schedule_type, owner):
+        self.run_cargo(install_dirs, "test")
+        if self.build_doc:
+            self.run_cargo(install_dirs, "doc", ["--no-deps"])
+
+    def _patchup_workspace(self, build_source_dir):
+        """
+        This method makes a lot of assumptions about the state of the project
+        and its cargo dependendies:
+        1. There is a virtual manifest with workspace in the root of this project
+        2. Crates from cargo dependencies can be extracted from Cargo.toml files
+           using _extract_crates function. It is using a heuristic so check its
+           code to understand how it is done.
+        3. The extracted cargo dependencies crates can be found in the
+           dependency's install dir using _resolve_crate_to_path function
+           which again is using a heuristic.
+
+        Notice that many things might go wrong here. E.g. if someone depends
+        on another getdeps crate by writing in their Cargo.toml file:
+
+            my-rename-of-crate = { package = "crate", git = "..." }
+
+        they can count themselves lucky because the code will raise an
+        Exception. There migh be more cases where the code will silently pass
+        producing bad results.
+        """
+        config = self._resolve_config(build_source_dir)
+        if config:
+            with open(os.path.join(build_source_dir, "Cargo.toml"), "a") as f:
+                # A fake manifest has to be crated to change the virtual
+                # manifest into a non-virtual. The virtual manifests are limited
+                # in many ways and the inability to define patches on them is
+                # one. Check https://github.com/rust-lang/cargo/issues/4934 to
+                # see if it is resolved.
+                f.write(
+                    """
+[package]
+name = "fake_manifest_of_{}"
+version = "0.0.0"
+[lib]
+path = "/dev/null"
+""".format(
+                        self.manifest.name
+                    )
+                )
+                f.write(config)
+
+    def _resolve_config(self, build_source_dir):
+        """
+        Returns a configuration to be put inside root Cargo.toml file which
+        patches the dependencies git code with local getdeps versions.
+        See https://doc.rust-lang.org/cargo/reference/manifest.html#the-patch-section
+        """
+        dep_to_git = self._resolve_dep_to_git()
+        dep_to_crates = CargoBuilder._resolve_dep_to_crates(
+            build_source_dir, dep_to_git
+        )
+
+        config = []
+        for name in sorted(dep_to_git.keys()):
+            git_conf = dep_to_git[name]
+            crates = sorted(dep_to_crates.get(name, []))
+            if not crates:
+                continue  # nothing to patch, move along
+            crates_patches = [
+                '{} = {{ path = "{}" }}'.format(
+                    crate,
+                    CargoBuilder._resolve_crate_to_path(crate, git_conf).replace(
+                        "\\", "\\\\"
+                    ),
+                )
+                for crate in crates
+            ]
+
+            config.append(
+                '[patch."{0}"]\n'.format(git_conf["repo_url"])
+                + "\n".join(crates_patches)
+            )
+        return "\n".join(config)
+
+    def _resolve_dep_to_git(self):
+        """
+        For each direct dependency of the currently build manifest check if it
+        is also cargo-builded and if yes then extract it's git configs and
+    install dir
+        """
+        dependencies = self.manifest.get_section_as_dict("dependencies", ctx=self.ctx)
+        if not dependencies:
+            return []
+
+        dep_to_git = {}
+        for dep in dependencies.keys():
+            dep_manifest = self.loader.load_manifest(dep)
+            if dep_manifest.get("build", "builder", ctx=self.ctx) != "cargo":
+                # This is a direct dependency, but it is not build with cargo
+                # so ignore it.
+                continue
+
+            git_conf = dep_manifest.get_section_as_dict("git", ctx=self.ctx)
+            if "repo_url" not in git_conf:
+                raise Exception(
+                    "A cargo dependency requires git.repo_url to be defined."
+                )
+            git_conf["inst_dir"] = self.loader.get_project_install_dir(dep_manifest)
+            dep_to_git[dep] = git_conf
+        return dep_to_git
+
+    @staticmethod
+    def _resolve_dep_to_crates(build_source_dir, dep_to_git):
+        """
+        This function traverse the build_source_dir in search of Cargo.toml
+        files, extracts the crate names from them using _extract_crates
+        function and returns a merged result containing crate names per
+        dependency name from all Cargo.toml files in the project.
+        """
+        if not dep_to_git:
+            return {}  # no deps, so don't waste time traversing files
+
+        dep_to_crates = {}
+        for root, _, files in os.walk(build_source_dir):
+            for f in files:
+                if f == "Cargo.toml":
+                    more_dep_to_crates = CargoBuilder._extract_crates(
+                        os.path.join(root, f), dep_to_git
+                    )
+                    for name, crates in more_dep_to_crates.items():
+                        dep_to_crates.setdefault(name, set()).update(crates)
+        return dep_to_crates
+
+    @staticmethod
+    def _extract_crates(cargo_toml_file, dep_to_git):
+        """
+        This functions reads content of provided cargo toml file and extracts
+        crate names per each dependency. The extraction is done by a heuristic
+        so it might be incorrect.
+        """
+        deps_to_crates = {}
+        with open(cargo_toml_file, "r") as f:
+            for line in f.readlines():
+                if line.startswith("#") or "git = " not in line:
+                    continue  # filter out commented lines and ones without git deps
+                for name, conf in dep_to_git.items():
+                    if 'git = "{}"'.format(conf["repo_url"]) in line:
+                        crate_name, _, _ = line.partition("=")
+                        deps_to_crates.setdefault(name, set()).add(crate_name.strip())
+        return deps_to_crates
+
+    @staticmethod
+    def _resolve_crate_to_path(crate, git_conf):
+        """
+        Tries to find <crate> in git_conf["inst_dir"] by searching a [package]
+        keyword followed by name = "<crate>".
+        """
+        source_dir = os.path.join(git_conf["inst_dir"], "source")
+        search_pattern = '[package]\nname = "{}"'.format(crate)
+
+        for root, _, files in os.walk(source_dir):
+            for fname in files:
+                if fname == "Cargo.toml":
+                    with open(os.path.join(root, fname), "r") as f:
+                        if search_pattern in f.read():
+                            return root
+
+        raise Exception("Failed to found crate {} in path {}".format(crate, source_dir))

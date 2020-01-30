@@ -1,3 +1,9 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 add_library(
     proxygenhttpserver STATIC
     RequestHandlerAdaptor.cpp
@@ -108,6 +114,11 @@ install(
 if (BUILD_QUIC)
   add_executable(hq
       samples/hq/main.cpp
+      samples/hq/FizzContext.cpp
+      samples/hq/HQClient.cpp
+      samples/hq/HQLoggerHelper.cpp
+      samples/hq/HQServer.cpp
+      samples/hq/HQParams.cpp
       samples/hq/SampleHandlers.cpp
       samples/hq/PartiallyReliableCurlClient.cpp
   )

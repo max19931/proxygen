@@ -1,12 +1,11 @@
 /*
- *  Copyright (c) 2019-present, Facebook, Inc.
- *  All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
+ * All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 
 #include <chrono>
@@ -237,14 +236,6 @@ struct ResourceData {
     return time_;
   }
 
-  /**
-   * Gets the update period for the for the record that may be used as
-   * a hint for callers to know when updated data is likely available.
-   */
-  std::chrono::milliseconds getUpdateInterval() const {
-    return updateIntervalMs_;
-  }
-
   void setCpuStats(double cpuRatioUtil,
                    double cpuSoftIrqRatioUtil,
                    std::vector<double>&& softIrqCpuCoreRatioUtils) {
@@ -295,14 +286,6 @@ struct ResourceData {
     time_ = updateTime;
   }
 
-  /**
-   * Sets the update period for the for the record that may be used as
-   * a hint for callers to know when updated data is likely available.
-   */
-  void setUpdateInterval(std::chrono::milliseconds updateInterval) {
-    updateIntervalMs_ = updateInterval;
-  }
-
   // Helper method to get ms since epoch.
   static std::chrono::milliseconds getEpochTime() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -335,7 +318,6 @@ struct ResourceData {
 
   // Refresh management fields
   std::chrono::milliseconds time_{0};
-  std::chrono::milliseconds updateIntervalMs_{0};
 };
 
 /**
